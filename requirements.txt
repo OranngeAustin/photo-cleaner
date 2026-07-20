@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+pywebview
+Pillow
+pillow-heif
+ImageHash
+send2trash
