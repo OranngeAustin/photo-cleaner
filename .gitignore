@@ -1,0 +1,18 @@
+# Python bytecode and test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Runtime logs
+*.log
+
+# PyInstaller and release artifacts
+.build/
+build/
+dist/
+release/
+*.spec
+
+# Editor settings
+.vscode/
+.idea/
