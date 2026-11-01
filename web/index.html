@@ -16,8 +16,8 @@
                 <span id="current-dir" style="margin-left: 15px; align-self: center; color: var(--text-muted); font-size: 0.9rem;">No folder selected</span>
             </div>
             <div class="tabs">
-                <button class="tab-btn active" data-tab="exact">Exact Matches</button>
-                <button class="tab-btn" data-tab="similar">Similar Matches</button>
+                <button class="tab-btn active" data-tab="exact">完全相同 (Exact)</button>
+                <button class="tab-btn" data-tab="similar">高度相似 (Similar)</button>
             </div>
         </header>
 
@@ -34,14 +34,14 @@
             <!-- Exact Matches -->
             <div id="tab-exact" class="tab-content active">
                 <div style="margin-bottom: 15px; display: flex; justify-content: flex-end;">
-                    <button id="auto-dedup-btn" class="btn primary">Deduplicate All</button>
+                    <button id="auto-dedup-btn" class="btn primary">全部去重</button>
                 </div>
                 <div id="exact-list" class="virtual-list"></div>
             </div>
             <!-- Similar Matches -->
             <div id="tab-similar" class="tab-content">
                 <div style="margin-bottom: 15px; display: flex; justify-content: flex-end;">
-                    <button id="similar-auto-dedup-btn" class="btn danger">Delete Unselected</button>
+                    <button id="similar-auto-dedup-btn" class="btn danger">删除未勾选</button>
                 </div>
                 <div id="similar-list" class="virtual-list"></div>
             </div>
@@ -55,9 +55,9 @@
             <img id="lightbox-img" src="" alt="Full size" />
         </div>
         <div id="lightbox-info" class="lightbox-info" aria-live="polite">
-            <div><span class="lightbox-info-label">File name</span><span id="lightbox-name">—</span></div>
-            <div><span class="lightbox-info-label">Date taken</span><span id="lightbox-captured-at">—</span></div>
-            <div><span class="lightbox-info-label">File size</span><span id="lightbox-size">—</span></div>
+            <div><span class="lightbox-info-label">文件名</span><span id="lightbox-name">—</span></div>
+            <div><span class="lightbox-info-label">拍摄时间</span><span id="lightbox-captured-at">—</span></div>
+            <div><span class="lightbox-info-label">文件大小</span><span id="lightbox-size">—</span></div>
         </div>
     </div>
 

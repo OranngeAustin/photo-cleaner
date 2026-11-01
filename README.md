@@ -1,69 +1,109 @@
 # Photo Cleaner
 
-A high-performance local Windows tool for finding and safely cleaning exact duplicate and visually similar photos. It combines a FastAPI backend with a desktop WebView interface for fast review of large photo libraries and long screenshots.
+一款基于 Python + FastAPI + WebUI 开发的高性能 Windows 本地照片去重工具。旨在为用户提供现代化、极速且安全的长截图和海量照片沉浸式清理体验。
 
-## Download
+## ✨ 核心特性
 
-A packaged Windows build is prepared for GitHub Releases. Download the executable from the repository's **Releases** page when available.
+### 1. 极速扫描与高性能聚类
+* **精准去重 (Exact Match)**：基于底层的文件 SHA256 校验和进行对比，无论文件名是否被修改，都能在极短的时间内为您精准锁定完全一模一样的重复文件。
+* **相似图片查找 (Similar Match)**：基于感知哈希算法 (pHash) 识别视觉内容相似的照片（如连拍、裁切）。
+* **高性能聚类**：相似模式先用六段、无漏检的候选索引排除绝大多数不可能匹配，再以 Hamming 距离做精确确认；最坏情况仍可能是 $O(K^2)$（$K$ = 唯一哈希数），但不再对所有哈希对无条件比较。
+* **缩略图懒加载 (Lazy Loading)**：前端 UI 按需加载照片缩略图；当前实现并非真正的虚拟滚动。
 
-## Features
+### 2. 沉浸式极速交互体验
+* **电竞级双通道控制**：完美支持纯鼠标操作，更适配左手键盘（WASD）高频操作，心流清理不断档。
+  * `W` / `S`：上下跳转照片组
+  * `A` / `D` 或方向键：焦点左右切换（全屏模式下无缝翻图）
+  * `Space` 或 `鼠标左键`：选中 / 取消选中焦点图片
+  * `Enter` 或 `鼠标右键` / `双击`：全屏打开原图预览 (Lightbox)
+  * `Delete`：一键清理当前组中未选中的照片（彻底舍弃 Backspace 防误触）
+* **可拖拽原图预览**：全屏预览中按住鼠标左键即可放大；保持按住时可向上下左右任意方向拖动查看细节，松开后自动恢复全貌。按住空格键也可临时放大，松开后恢复全貌。
+* **照片信息浮层**：全屏预览左下角会显示文件名（含扩展名）、EXIF 拍摄时间和文件大小；没有可用 EXIF 时间时会明确显示“未记录”。
+* **原生视窗体验**：使用 `pywebview` 封装为纯净的 Windows 独立窗口，没有浏览器地址栏和多余菜单。
 
-### Exact and Similar Matching
+### 3. “无感”删除与安全反悔机制
+常规清理使用“乐观删除”与“托盘反悔（Toast Undo）”机制；高度相似照片的全局清理则会先要求二次确认：
+* **单行清理反悔**：按下 `Delete`，照片瞬间消失以保持清爽，屏幕左下角弹出 Toast 提示框。您有 **3 秒钟**的时间按下 `Ctrl+Z` 撤销操作，图片瞬间复原。
+* **一键全部去重**：提供全局“全部去重”按钮，自动保留每组的第 1 张照片并清理其余。同样享受 3 秒反悔保护。
+* **高度相似批量清理**：高度相似页提供“删除未勾选”按钮，只会删除用户未勾选的照片。点击后会明确询问是否已浏览全部照片并确认删除；确认后同样保留 3 秒 `Ctrl+Z` 反悔时间。
+* **提交确认与部分失败恢复**：3 秒窗口结束后才向后端提交删除；前端只移除后端确认 `deleted` 的路径。文件被占用、网络失败或部分失败时，未删除的图片和用户原先的保留选择都会恢复，可继续重试。
+* **系统回收站**：所有的删除操作底层调用 `send2trash`，照片只会被安全移入 Windows 系统回收站，永远不会发生无可挽回的误删。
 
-- **Exact duplicates:** groups files by SHA-256 content rather than file name.
-- **Similar photos:** uses perceptual hashing (pHash) to identify visually similar images such as bursts and crops.
-- **Efficient candidate selection:** exact matching narrows work by file size and a 64 KiB prefix hash before calculating a full hash. Similar matching uses a six-segment candidate index and confirms matches by Hamming distance.
-- **Lazy thumbnails:** the interface loads thumbnail images on demand.
+## 🔬 关键实现与可靠性保障
 
-### Review Workflow
+### 精确去重：分层缩小候选集
 
-- Switch between **Exact Matches** and **Similar Matches**.
-- Use `W` and `S` to move between groups, `A` and `D` or the arrow keys to move between images, and `Space` or left-click to select an image.
-- Press `Enter`, right-click, or double-click to open the original image preview.
-- Hold the left mouse button or `Space` in the preview to zoom and drag across the image.
-- The preview shows the file name, capture date when available, and file size.
+精确模式不是对所有文件无条件计算完整 SHA-256，而是依次执行：目录枚举时复用文件大小元数据 → 只保留同大小文件 → 计算 64 KiB 前缀哈希 → 仅对仍可能相同的大文件计算完整 SHA-256。小于等于 64 KiB 的文件，前缀已覆盖整文件，可直接作为精确结论。这样能避免把完整哈希成本花在明显不可能重复的大量照片上。
 
-### Safe Cleanup
+文件哈希和感知哈希均在有界线程池中运行：默认工作线程数为 `min(32, CPU 核数 + 4)`，最多同时保留两倍工作数的待处理任务。扫描取消会停止继续提交任务，并在哈希块之间尽快响应，而不是等待整批文件全部处理完。
 
-- A clean action first enters a three-second undo window. Press `Ctrl+Z` or use **Undo** to cancel it.
-- **Deduplicate All** keeps the first item in each exact-match group and queues the rest for cleanup.
-- Similar-photo cleanup only deletes unselected photos and asks for confirmation first.
-- Confirmed files are moved through `Send2Trash` to the Windows Recycle Bin. A failed or partial deletion leaves unaffected photos visible for retry.
+### 相似图片：无漏检候选索引 + 精确确认
 
-## Implementation Notes
+相似模式使用 pHash，并以 Hamming 距离阈值 `5` 判断候选。64 位感知哈希被拆为六段（11/11/11/11/10/10 位）；当最多只有 5 位不同，按抽屉原理至少有一段相同，因此索引可以排除不可能的配对而不漏掉阈值内的匹配。候选仍会逐对计算真实 Hamming 距离确认。
 
-- A bounded worker pool performs hashing and responds to scan cancellation between blocks.
-- Thumbnail cache keys include the source path, file modification time in nanoseconds, and file size.
-- Every preview and deletion request is checked against the active scan root and the cached scan results, preventing arbitrary path reads or deletions.
-- The static `web/` directory is automatically located from the project directory during development and from the PyInstaller bundle when packaged.
+相似分组采用“锚点”语义：一个组中的哈希需与首个锚点在阈值内，并不把两两相邻但首尾超阈值的链条自动合并。这让结果边界稳定、可预期，也避免误把长串近似图片全部归为同一组。
 
-## Run from Source
+### 预览、访问控制与扫描生命周期
 
-Requirements: Python 3.12 or later on Windows.
+缩略图以源路径、修改时间纳秒值和文件大小作为缓存键；源文件变化后会自动失效。带透明度的 PNG/GIF（包括调色板字节透明度）会先规范化为 RGBA，再合成到白色背景并编码为 JPEG，避免透明信息在 RGB 转换时丢失或触发 Pillow 警告。前端使用浏览器原生 `loading="lazy"` 延迟请求缩略图，避免初次渲染一次性解码所有原图。
 
-```powershell
-python -m pip install -r requirements.txt
+后端每次只允许一个扫描任务。扫描根目录经规范化后保存，缩略图、原图、照片信息和删除接口同时校验“路径仍在扫描根内”以及“路径属于当前目录下两个已缓存扫描模式的结果”，从而拒绝任意路径读取或删除；在同一目录切换“完全相同”和“高度相似”时，另一标签的预览仍可用，切换目录时两者会一起失效。目录遍历还会记录已访问的真实目录，避免目录链接造成循环扫描。
+
+### 删除状态机：撤销、确认与选择保留
+
+清理动作先进入 3 秒可撤销窗口，`Ctrl+Z` 只取消待提交操作；真正提交后，提交锁会阻止新的清理动作覆盖旧请求。服务器返回后，只有确实移入回收站的路径才会从界面数据中剔除。部分成功重渲染时，仍存在的选中路径按路径恢复，因此不会把用户手动选择保留的图片误变为下一次删除目标。
+
+“全部去重”只会隐藏确实有可删除图片的行；高度相似的全局清理则以当前勾选状态为准，只暂时隐藏包含未勾选照片的行。若相似页已有同标签的 3 秒反悔窗口，确认新的全局清理后会将其隐藏行一并纳入新批次；取消确认则保留原反悔窗口。成功清理后，少于两张的组不再作为重复组展示。这避免了单张残留图片在没有任何待删除操作时被错误隐藏。
+
+### 单文件打包资源定位
+
+开发环境从项目目录读取 `web/`；PyInstaller 单文件模式则从其解包目录 `_MEIPASS` 读取同一份资源。README 中的 `--add-data "web;web"` 与该路径解析配套，避免生成 EXE 后找不到首页、脚本或样式。
+
+## 🚀 技术栈
+
+* **后端逻辑**：Python 3.12, FastAPI, Uvicorn, Pillow, pillow-heif（HEIC）, ImageHash, Send2Trash
+* **前端界面**：HTML5, 原生 CSS3 (现代深色主题, 玻璃拟物态风格, 丝滑过渡动画), Vanilla JavaScript
+* **桌面端封装**：pywebview (支持调用原生 Windows 文件夹选择器等交互)
+
+## 📦 安装与运行
+
+确保您的环境中已安装 Python 3.x，并安装必要的依赖：
+
+```bash
+# 1. 克隆代码或进入项目目录
+cd photo_cleaner
+
+# 2. 安装依赖
+pip install fastapi uvicorn pillow pillow-heif imagehash pywebview send2trash
+
+# 3. 运行程序
 python main.py
 ```
 
-### WebView2 Runtime
-
-The Windows build uses the Microsoft Edge WebView2 Runtime. It is included with most current Windows installations; if the application window does not open, install the WebView2 Runtime and try again.
-
-## Build a Windows Executable
-
-```powershell
-python -m pip install pyinstaller
-python -m PyInstaller --noconfirm --clean --windowed --onefile --name PhotoCleaner --add-data web;web main.py
+如果你希望将其打包成独立的 `.exe` 文件供日常双击使用，可以运行：
+```bash
+pip install pyinstaller
+pyinstaller -F -w --name PhotoCleaner --add-data "web;web" main.py
 ```
 
-The `--add-data web;web` option embeds the HTML, CSS, and JavaScript interface in the executable.
+`--add-data "web;web"` 会把前端页面、脚本和样式一并放入单文件程序；程序启动时会自动从 PyInstaller 的解包目录读取这些资源。
 
-## Tests
+## 📝 开发与维护
 
-```powershell
+* 后端入口文件为 `main.py`
+* 扫描与哈希核心逻辑位于 `backend/scanner.py`
+* 界面渲染与交互位于 `web/index.html`、`web/style.css`、`web/script.js`
+
+## ✅ 验证与回归覆盖
+
+```bash
+# 后端、扫描器、路径安全和打包资源目录测试
 python -m pytest -q
+
+# 前端删除状态、预览拖拽、信息浮层和双击预览测试
 node --test tests/test_frontend.js
 ```
 
-The automated coverage includes scanning, cancellation, cache invalidation, transparent image thumbnails, path authorization, preview metadata, safe deletion behavior, undo flows, and keyboard and mouse preview interactions.
+当前回归基线为 Python 19 项、Node 前端 19 项。前端测试覆盖删除请求被拒绝、全部失败、部分成功、部分成功后保留选择、单张残留组、相似页全局清理的取消确认/仅未勾选路径/3 秒撤销/已有反悔窗口合并/提交路径，以及成功和部分失败时的跨标签缓存同步、双击原图预览、双向拖拽、信息浮层、边界导航不重复加载和异步信息竞态；Python 测试覆盖扫描器、取消、缓存失效、调色板透明度缩略图、照片信息、跨模式预览授权、越界路径拒绝和 PyInstaller 资源目录。
+
+每轮问题、修复建议和独立复验结论见 [ITERATION_LOG.md](ITERATION_LOG.md)。完整 EXE 构建受本机依赖收集时间影响，建议在发布环境执行 README 的 PyInstaller 命令后，再做一次手工启动验证。

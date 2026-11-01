@@ -152,7 +152,7 @@ function displayFileName(path) {
 }
 
 function formatFileSize(sizeBytes) {
-    if (!Number.isFinite(sizeBytes) || sizeBytes < 0) return 'Unknown';
+    if (!Number.isFinite(sizeBytes) || sizeBytes < 0) return '未知';
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
     let value = sizeBytes;
     let unitIndex = 0;
@@ -173,7 +173,7 @@ function updateLightboxInfo({ name = '—', capturedAt = '—', size = '—' }) 
 function loadLightboxInfo(path) {
     const requestId = ++lightboxInfoRequestId;
     const fallbackName = displayFileName(path);
-    updateLightboxInfo({ name: fallbackName, capturedAt: 'Loading...', size: 'Loading...' });
+    updateLightboxInfo({ name: fallbackName, capturedAt: '加载中…', size: '加载中…' });
     fetch(`/api/photo_info?path=${encodeURIComponent(path)}`)
         .then(response => {
             if (!response.ok) throw new Error(`Photo metadata request failed: ${response.status}`);
@@ -183,13 +183,13 @@ function loadLightboxInfo(path) {
             if (requestId !== lightboxInfoRequestId || lightbox.classList.contains('hidden')) return;
             updateLightboxInfo({
                 name: info.name || fallbackName,
-                capturedAt: info.captured_at || 'Not recorded',
+                capturedAt: info.captured_at || '未记录',
                 size: formatFileSize(info.size_bytes),
             });
         })
         .catch(() => {
             if (requestId !== lightboxInfoRequestId || lightbox.classList.contains('hidden')) return;
-            updateLightboxInfo({ name: fallbackName, capturedAt: 'Unavailable', size: 'Unavailable' });
+            updateLightboxInfo({ name: fallbackName, capturedAt: '未能读取', size: '未能读取' });
         });
 }
 
@@ -330,7 +330,7 @@ if (similarAutoDedupBtn) {
 
         if (toDeleteAll.length === 0) return;
         const confirmed = window.confirm(
-            `Delete ${toDeleteAll.length} unselected similar photos?\n\nPlease confirm that you have reviewed all photos and want to delete these unselected photos.`
+            `将删除 ${toDeleteAll.length} 张未勾选的高度相似照片。\n\n请确认您已浏览全部照片，并确认删除这些未勾选的照片？`
         );
         if (!confirmed) return;
 

@@ -429,7 +429,7 @@ test('similar bulk deletion asks for confirmation and leaves every photo visible
     runtime.elements.similarAutoDedupBtn.dispatch('click');
 
     assert.equal(confirmations.length, 1);
-    assert.match(confirmations[0], /reviewed all photos/);
+    assert.match(confirmations[0], /已浏览全部照片/);
     assert.notEqual(row.style.display, 'none');
     assert.equal(runtime.api.getPendingDeletion(), null);
 });
