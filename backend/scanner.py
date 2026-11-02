@@ -7,14 +7,16 @@ import threading
 from bisect import bisect_right
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from functools import lru_cache
-from typing import Callable, Dict, Iterator
+from typing import Callable, Dict, Iterator, TypeVar
 
 import imagehash
 from PIL import Image
 
 
 logger = logging.getLogger(__name__)
+ResultT = TypeVar("ResultT")
 
 try:
     from pillow_heif import register_heif_opener
@@ -37,8 +39,56 @@ SIMILARITY_THRESHOLD = 5
 PHASH_SEGMENTS = ((0, 11), (11, 11), (22, 11), (33, 11), (44, 10), (54, 10))
 
 
+# Decoding costs about 4 bytes per pixel here (an RGB decode plus pHash's
+# greyscale copy).  Concurrent decodes share this budget, roughly 0.8 GB: about
+# fifteen 12 MP photos at once, or one image at Pillow's 179 MP hard limit.
+DECODE_PIXEL_BUDGET = 192_000_000
+
+
 def _was_cancelled(cancel_event: threading.Event | None) -> bool:
     return cancel_event is not None and cancel_event.is_set()
+
+
+class _PixelBudget:
+    """Caps the pixels that threads decode at the same time.
+
+    Up to 32 scan workers (plus thumbnail requests) could otherwise each hold a
+    full-size panorama or large TIFF in memory at once.  An image larger than
+    the whole budget is still decoded, but alone.
+    """
+
+    def __init__(self, capacity: int):
+        self.capacity = capacity
+        self._in_use = 0
+        self._condition = threading.Condition()
+
+    @contextmanager
+    def reserve(self, pixels: int, cancel_event: threading.Event | None = None) -> Iterator[bool]:
+        """Hold ``pixels`` of the budget for the ``with`` body.
+
+        Yields False, without holding anything, if ``cancel_event`` is set
+        while waiting for room.
+        """
+        amount = min(max(int(pixels), 0), self.capacity)
+        with self._condition:
+            while self._in_use + amount > self.capacity and not _was_cancelled(cancel_event):
+                # Time out now and then to notice a cancel nobody notifies.
+                self._condition.wait(timeout=0.1)
+            granted = self._in_use + amount <= self.capacity
+            if granted:
+                self._in_use += amount
+        if not granted:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            with self._condition:
+                self._in_use -= amount
+                self._condition.notify_all()
+
+
+_decode_budget = _PixelBudget(DECODE_PIXEL_BUDGET)
 
 
 def get_file_hash(filepath: str, cancel_event: threading.Event | None = None) -> str:
@@ -66,23 +116,40 @@ def get_file_hash(filepath: str, cancel_event: threading.Event | None = None) ->
         return ""
 
 
+def get_file_prefix_hash_and_length(
+    filepath: str,
+    cancel_event: threading.Event | None = None,
+    prefix_size: int = PREFIX_HASH_SIZE,
+) -> tuple[str, int] | None:
+    """Hash a file prefix and return it with the number of bytes read.
+
+    One byte past the prefix is read, so the length is the file's size when
+    the file fits in the prefix and ``prefix_size + 1`` when it does not.  A
+    small file that grew or shrank since enumeration (a copy or sync still in
+    progress) shows up as a length that differs from its enumerated size,
+    without the cost of an extra ``fstat`` call.
+    """
+    try:
+        if _was_cancelled(cancel_event):
+            return None
+        with open(filepath, 'rb') as file_obj:
+            data = file_obj.read(prefix_size + 1)
+        if _was_cancelled(cancel_event):
+            return None
+        return hashlib.sha256(memoryview(data)[:prefix_size]).hexdigest(), len(data)
+    except OSError:
+        logger.warning("Failed to hash file prefix: %s", filepath, exc_info=True)
+        return None
+
+
 def get_file_prefix_hash(
     filepath: str,
     cancel_event: threading.Event | None = None,
     prefix_size: int = PREFIX_HASH_SIZE,
 ) -> str:
     """Hash only a file prefix for the exact-match prefilter."""
-    try:
-        if _was_cancelled(cancel_event):
-            return ""
-        with open(filepath, 'rb') as file_obj:
-            prefix = file_obj.read(prefix_size)
-        if _was_cancelled(cancel_event):
-            return ""
-        return hashlib.sha256(prefix).hexdigest()
-    except OSError:
-        logger.warning("Failed to hash file prefix: %s", filepath, exc_info=True)
-        return ""
+    result = get_file_prefix_hash_and_length(filepath, cancel_event, prefix_size)
+    return result[0] if result else ""
 
 
 def get_image_phash(filepath: str, cancel_event: threading.Event | None = None) -> str:
@@ -90,11 +157,39 @@ def get_image_phash(filepath: str, cancel_event: threading.Event | None = None) 
         if _was_cancelled(cancel_event):
             return ""
         with Image.open(filepath) as img:
-            result = str(imagehash.phash(img))
+            # Opening reads only the header; phash() decodes the full image.
+            with _decode_budget.reserve(img.width * img.height, cancel_event) as granted:
+                if not granted:
+                    return ""
+                result = str(imagehash.phash(img))
         return "" if _was_cancelled(cancel_event) else result
     except Exception:
         logger.warning("Failed to compute pHash: %s", filepath, exc_info=True)
         return ""
+
+
+EXIF_ORIENTATION_TAG = 274
+# The same mapping as PIL.ImageOps.exif_transpose.
+_ORIENTATION_TRANSPOSE = {
+    2: Image.Transpose.FLIP_LEFT_RIGHT,
+    3: Image.Transpose.ROTATE_180,
+    4: Image.Transpose.FLIP_TOP_BOTTOM,
+    5: Image.Transpose.TRANSPOSE,
+    6: Image.Transpose.ROTATE_270,
+    7: Image.Transpose.TRANSVERSE,
+    8: Image.Transpose.ROTATE_90,
+}
+_SWAPS_AXES = {Image.Transpose.TRANSPOSE, Image.Transpose.TRANSVERSE, Image.Transpose.ROTATE_90, Image.Transpose.ROTATE_270}
+
+
+def _orientation_transpose(img: Image.Image) -> Image.Transpose | None:
+    """Return the transpose that displays ``img`` upright, if its EXIF needs one."""
+    try:
+        orientation = img.getexif().get(EXIF_ORIENTATION_TAG)
+    except Exception:  # Malformed EXIF must not cost the whole thumbnail.
+        logger.debug("Unreadable EXIF orientation: %s", getattr(img, "filename", ""), exc_info=True)
+        return None
+    return _ORIENTATION_TRANSPOSE.get(orientation) if isinstance(orientation, int) else None
 
 
 @lru_cache(maxsize=512)
@@ -110,22 +205,33 @@ def _generate_thumbnail_cached(
     del mtime_ns, file_size
     try:
         with Image.open(image_path) as img:
+            # Read the orientation now: the conversions below drop metadata.
+            # The bounding box applies to the upright image, and only the small
+            # thumbnail is rotated, never the full-size decode.
+            transpose = _orientation_transpose(img)
+            if transpose in _SWAPS_AXES:
+                max_width, max_height = max_height, max_width
             max_size = (max_width, max_height)
             if img.format == 'JPEG':
+                # Decode at a reduced scale (down to 1/8); img.size reports it.
                 img.draft('RGB', max_size)
+            with _decode_budget.reserve(img.width * img.height):
                 img.load()
-            # JPEG has no alpha channel. Normalize PNG/GIF transparency first,
-            # including palette images whose transparency is a byte table, then
-            # composite it on a deterministic white background.
-            if "transparency" in img.info:
-                img = img.convert("RGBA")
+                # JPEG has no alpha channel. Normalize PNG/GIF transparency first,
+                # including palette images whose transparency is a byte table.
+                if "transparency" in img.info:
+                    img = img.convert("RGBA")
+                if img.mode not in ("RGB", "RGBA", "LA"):
+                    img = img.convert("RGB")
+                img.thumbnail(max_size)
+            # Composite on a deterministic white background only after
+            # shrinking: a full-size background would double the memory.
             if img.mode in ("RGBA", "LA"):
                 background = Image.new("RGB", img.size, "white")
                 background.paste(img, mask=img.getchannel("A"))
                 img = background
-            elif img.mode != "RGB":
-                img = img.convert("RGB")
-            img.thumbnail(max_size)
+            if transpose is not None:
+                img = img.transpose(transpose)
             img_byte_arr = io.BytesIO()
             img.save(img_byte_arr, format='JPEG', quality=85)
             return img_byte_arr.getvalue()
@@ -263,9 +369,13 @@ class Scanner:
     def _iter_parallel_results(
         self,
         filepaths: list[str],
-        worker: Callable[[str, threading.Event], str],
-    ) -> Iterator[tuple[str, str]]:
-        """Process a bounded number of futures so cancellation is prompt."""
+        worker: Callable[[str, threading.Event], ResultT],
+    ) -> Iterator[tuple[str, ResultT | str]]:
+        """Process a bounded number of futures so cancellation is prompt.
+
+        A worker that raises is logged and reported as ``""``, so callers
+        skip any falsy result.
+        """
         if not filepaths:
             return
 
@@ -461,12 +571,18 @@ class Scanner:
 
         callback('status', {'message': f'Filtering {len(files_to_filter)} same-size files by prefix hash...'})
         prefix_groups: dict[tuple[int, str], list[str]] = defaultdict(list)
-        for completed, (filepath, prefix_hash) in enumerate(
-            self._iter_parallel_results(files_to_filter, get_file_prefix_hash), start=1
+        # Files whose size changed after enumeration: a prefix match alone
+        # proves nothing about them, even if they were small when listed.
+        resized_files: set[str] = set()
+        for completed, (filepath, prefix_result) in enumerate(
+            self._iter_parallel_results(files_to_filter, get_file_prefix_hash_and_length), start=1
         ):
             if self.cancel_requested:
                 return []
-            if prefix_hash:
+            if prefix_result:
+                prefix_hash, bytes_read = prefix_result
+                if bytes_read != min(file_sizes[filepath], PREFIX_HASH_SIZE + 1):
+                    resized_files.add(filepath)
                 prefix_groups[(file_sizes[filepath], prefix_hash)].append(filepath)
             if completed % 100 == 0:
                 callback('progress', {'current': completed, 'total': len(files_to_filter), 'phase': 'prefix_filter'})
@@ -477,7 +593,7 @@ class Scanner:
             if len(paths) < 2:
                 continue
             paths.sort(key=os.path.normcase)
-            if file_size <= PREFIX_HASH_SIZE:
+            if file_size <= PREFIX_HASH_SIZE and resized_files.isdisjoint(paths):
                 exact_results.append(paths)
             else:
                 files_to_hash.extend(paths)

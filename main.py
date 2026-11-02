@@ -10,9 +10,9 @@ from typing import Literal, List
 import uvicorn
 import webview
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
-from PIL import Image, UnidentifiedImageError
+from PIL import ExifTags, Image, UnidentifiedImageError
 from pydantic import BaseModel
 from send2trash import send2trash
 
@@ -28,7 +28,57 @@ def _resource_dir() -> Path:
     return Path(getattr(sys, "_MEIPASS", PROJECT_DIR))
 
 
+# The server only listens on 127.0.0.1, but a browser can still be steered at
+# it.  DNS rebinding: a page on attacker.example re-points its own name at
+# 127.0.0.1 and then calls this API as a same-origin page; its requests still
+# carry "Host: attacker.example".  Any other site can also post straight to
+# http://127.0.0.1:<port>; those requests carry that site's Origin.
+TRUSTED_HOSTS = frozenset({"127.0.0.1", "localhost"})
+
+
+def _host_name(host_header: str) -> str:
+    """Return the lower-cased host name of a Host header, without the port."""
+    host = host_header.strip().lower()
+    if host.startswith("["):
+        return host[1:host.find("]")] if "]" in host else host
+    return host.split(":", 1)[0]
+
+
+def _is_trusted_request(headers: dict[str, str]) -> bool:
+    host = headers.get("host", "")
+    if _host_name(host) not in TRUSTED_HOSTS:
+        return False
+    # Browsers send Origin on cross-origin requests and on same-origin POSTs;
+    # the app's own page always sends exactly its own origin.
+    origin = headers.get("origin")
+    return origin is None or origin.strip().lower() == f"http://{host.strip().lower()}"
+
+
+class LocalRequestGuard:
+    """Reject HTTP requests that did not come from the app's own page."""
+
+    def __init__(self, asgi_app):
+        self.app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            headers = {
+                name.decode("latin-1").lower(): value.decode("latin-1")
+                for name, value in scope["headers"]
+            }
+            if not _is_trusted_request(headers):
+                logger.warning(
+                    "Rejected request with Host %r and Origin %r",
+                    headers.get("host"),
+                    headers.get("origin"),
+                )
+                await PlainTextResponse("Forbidden", status_code=403)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 app = FastAPI()
+app.add_middleware(LocalRequestGuard)
 thumbnail_scanner = Scanner()
 scan_lock = threading.Lock()
 active_scanner: Scanner | None = None
@@ -36,6 +86,12 @@ allowed_scan_root: str | None = None
 allowed_result_paths_by_mode: dict[str, set[str]] = {
     "exact": set(),
     "similar": set(),
+}
+# (size, mtime_ns) of each result path when its scan finished, keyed like
+# allowed_result_paths_by_mode; None if the file could not be read then.
+result_fingerprints_by_mode: dict[str, dict[str, tuple[int, int] | None]] = {
+    "exact": {},
+    "similar": {},
 }
 
 # In-memory storage for scan results to stream to the frontend.
@@ -103,16 +159,28 @@ def is_result_path_allowed(path: str) -> bool:
         return any(path_key in paths for paths in allowed_result_paths_by_mode.values())
 
 
+# DateTimeOriginal and DateTimeDigitized, then IFD0's DateTime (last modified).
+_CAPTURE_TIME_TAGS = (36867, 36868)
+_MODIFIED_TIME_TAG = 306
+
+
 def _read_capture_time(path: str) -> str | None:
     """Read a displayable capture time from EXIF without decoding pixel data."""
     try:
         with Image.open(path) as image:
             exif = image.getexif()
-            raw_value = next(
-                (exif.get(tag) for tag in (36867, 36868, 306) if exif.get(tag)),
-                None,
-            )
-    except (OSError, SyntaxError, UnidentifiedImageError):
+            # The capture tags belong in the Exif sub-IFD; getexif() itself
+            # only holds IFD0, where DateTime is the last-modified time.
+            try:
+                exif_ifd = exif.get_ifd(ExifTags.IFD.Exif)
+            except Exception:  # A malformed sub-IFD must not hide IFD0.
+                logger.debug("Unreadable Exif sub-IFD: %s", path, exc_info=True)
+                exif_ifd = {}
+            candidates = [exif_ifd.get(tag) for tag in _CAPTURE_TIME_TAGS]
+            # Some writers put the capture tags in IFD0 instead.
+            candidates += [exif.get(tag) for tag in (*_CAPTURE_TIME_TAGS, _MODIFIED_TIME_TAG)]
+            raw_value = next((value for value in candidates if value), None)
+    except (OSError, SyntaxError, UnidentifiedImageError, Image.DecompressionBombError):
         return None
 
     if raw_value is None:
@@ -126,6 +194,27 @@ def _read_capture_time(path: str) -> str | None:
     return value or None
 
 
+def _iter_result_path_keys(results: dict, mode: str):
+    """Yield ``(absolute_path, _path_key(path))`` for every result path.
+
+    Each directory is resolved once; see ``_collect_result_path_keys``.
+    """
+    # Maps a directory to its resolved path, ending in a separator.
+    resolved_prefixes: dict[str, str] = {}
+    for group in results.get(mode, []):
+        for path in group:
+            absolute_path = os.path.abspath(path)
+            directory, name = os.path.split(absolute_path)
+            if not name or os.path.islink(absolute_path):
+                yield absolute_path, _path_key(path)
+                continue
+            prefix = resolved_prefixes.get(directory)
+            if prefix is None:
+                prefix = os.path.join(os.path.realpath(directory), "")
+                resolved_prefixes[directory] = prefix
+            yield absolute_path, os.path.normcase(prefix + name)
+
+
 def _collect_result_path_keys(results: dict, mode: str) -> set[str]:
     """Return ``_path_key`` for every result path, resolving each directory once.
 
@@ -134,22 +223,44 @@ def _collect_result_path_keys(results: dict, mode: str) -> set[str]:
     directories, so caching the directory resolution replaces one realpath per
     file (several lstat calls, or a handle open on Windows) with one per folder.
     """
-    # Maps a directory to its resolved path, ending in a separator.
-    resolved_prefixes: dict[str, str] = {}
-    keys: set[str] = set()
-    for group in results.get(mode, []):
-        for path in group:
-            absolute_path = os.path.abspath(path)
-            directory, name = os.path.split(absolute_path)
-            if not name or os.path.islink(absolute_path):
-                keys.add(_path_key(path))
-                continue
-            prefix = resolved_prefixes.get(directory)
-            if prefix is None:
-                prefix = os.path.join(os.path.realpath(directory), "")
-                resolved_prefixes[directory] = prefix
-            keys.add(os.path.normcase(prefix + name))
-    return keys
+    return {path_key for _, path_key in _iter_result_path_keys(results, mode)}
+
+
+def _file_fingerprint(path: str) -> tuple[int, int] | None:
+    try:
+        stat_result = os.stat(path)
+    except OSError:
+        return None
+    return stat_result.st_size, stat_result.st_mtime_ns
+
+
+def _collect_result_fingerprints(results: dict, mode: str) -> dict[str, tuple[int, int] | None]:
+    """Map each result's ``_path_key`` to its current ``(size, mtime_ns)``."""
+    return {
+        path_key: _file_fingerprint(absolute_path)
+        for absolute_path, path_key in _iter_result_path_keys(results, mode)
+    }
+
+
+def _matches_scan_fingerprint(path: str) -> bool:
+    """Whether ``path`` still has the size and mtime it had when its scan finished.
+
+    A sync tool or editor may have replaced the file with different content
+    since then; deleting it would remove something the user never reviewed.
+    """
+    path_key = _path_key(path)
+    with scan_lock:
+        recorded = [
+            fingerprints[path_key]
+            for fingerprints in result_fingerprints_by_mode.values()
+            if path_key in fingerprints
+        ]
+    if not recorded:
+        # Every scan result gets a fingerprint when its scan finishes, so only
+        # a whitelist filled in some other way (as tests do) lacks one.
+        return True
+    current = _file_fingerprint(path)
+    return current is not None and current in recorded
 
 
 @app.post("/api/scan")
@@ -169,6 +280,8 @@ def start_scan(req: ScanRequest):
         if allowed_scan_root is None or os.path.normcase(allowed_scan_root) != os.path.normcase(scan_root):
             for paths in allowed_result_paths_by_mode.values():
                 paths.clear()
+            for fingerprints in result_fingerprints_by_mode.values():
+                fingerprints.clear()
         allowed_scan_root = scan_root
         scan_state["status"] = "scanning"
         scan_state["message"] = f"Initializing {req.mode} scan..."
@@ -180,6 +293,11 @@ def start_scan(req: ScanRequest):
 
     def callback(event_type: str, data: dict) -> None:
         global active_scanner
+        fingerprints: dict[str, tuple[int, int] | None] = {}
+        if event_type == 'done':
+            # Resolving and stat-ing every result is file-system work; finish
+            # it before taking scan_lock so status polls never wait on it.
+            fingerprints = _collect_result_fingerprints(data, req.mode)
         with scan_lock:
             if active_scanner is not scan_job:
                 return
@@ -191,7 +309,8 @@ def start_scan(req: ScanRequest):
                 scan_state["results"] = data
                 scan_state["cancelled"] = data.get("cancelled", False)
                 scan_state["message"] = data.get("error", scan_state["message"])
-                allowed_result_paths_by_mode[req.mode] = _collect_result_path_keys(data, req.mode)
+                allowed_result_paths_by_mode[req.mode] = set(fingerprints)
+                result_fingerprints_by_mode[req.mode] = fingerprints
                 scan_state["status"] = "idle"
                 active_scanner = None
                 scan_state["done"] = True  # Frontend treats this as an atomic completion marker.
@@ -235,12 +354,18 @@ def delete_files(req: DeleteRequest):
             if not is_result_path_allowed(real_path) or not os.path.isfile(real_path):
                 errors.append(requested_path)
                 continue
+            if not _matches_scan_fingerprint(real_path):
+                logger.warning("File changed since the scan, not deleting: %s", requested_path)
+                errors.append(requested_path)
+                continue
             send2trash(real_path)
             success.append(requested_path)
             with scan_lock:
                 path_key = _path_key(real_path)
                 for paths in allowed_result_paths_by_mode.values():
                     paths.discard(path_key)
+                for fingerprints in result_fingerprints_by_mode.values():
+                    fingerprints.pop(path_key, None)
         except Exception:
             logger.warning("Failed to delete file: %s", requested_path, exc_info=True)
             errors.append(requested_path)

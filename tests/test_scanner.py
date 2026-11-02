@@ -330,13 +330,17 @@ def test_scan_directory_symlink_cycle(tmp_path):
     j_path = d2 / "j_d1"
     try:
         subprocess.run(["cmd", "/c", "mklink", "/J", str(j_path), str(d1)], check=True, stdout=subprocess.DEVNULL)
-    except subprocess.CalledProcessError:
-        pytest.skip("Requires privileges to create junction")
+    except (OSError, subprocess.CalledProcessError):
+        # OSError: no cmd.exe (not Windows); CalledProcessError: no privilege.
+        pytest.skip("Requires Windows and privileges to create a junction")
         
     scanner = Scanner()
     results = []
     scanner.scan_directory(str(d1), 'exact', lambda ev, data: results.append((ev, data)))
     assert results[-1][0] == 'done'
+    # The junction leads back to d1; real-path de-duplication must stop the
+    # loop, so the image is listed exactly once.
+    assert Scanner()._enumerate_image_files(str(d1), collect_sizes=False)[0] == [str(p1)]
 
 
 def _symlink_or_skip(link, target):
@@ -440,3 +444,255 @@ def test_cluster_cancelled_from_progress_keeps_only_completed_anchor_groups():
         phash_dict, cancel_event=cancel_event, progress_callback=cancel_at_second_report
     )
     assert result == _reference_anchor_clusters(phash_dict, 5, cancel_at=100)
+
+
+def test_exact_scan_full_hashes_small_files_that_grew_after_enumeration(tmp_path):
+    # M1: sizes come from enumeration. A copy still being written can be past
+    # 64 KiB by the time its prefix is read, and then the prefix no longer
+    # covers the whole file, so it must not decide the match on its own.
+    shared_prefix = os.urandom(scanner_module.PREFIX_HASH_SIZE + 4_000)
+    first = tmp_path / "first.jpg"
+    second = tmp_path / "second.jpg"
+    copy = tmp_path / "copy.jpg"
+    first.write_bytes(shared_prefix + b"first tail")
+    second.write_bytes(shared_prefix + b"other tail")
+    copy.write_bytes(shared_prefix + b"first tail")
+    stale_sizes = {str(path): 1_000 for path in (first, second, copy)}
+
+    groups = Scanner(max_workers=2)._scan_exact(sorted(stale_sizes), stale_sizes, lambda *_: None)
+
+    assert groups == [[str(copy), str(first)]]
+
+
+def test_thumbnail_follows_exif_orientation(tmp_path):
+    # M3: phones store portrait shots as landscape pixels plus Orientation=6.
+    image = Image.new("RGB", (400, 200), "red")
+    image.paste((0, 0, 255), (200, 0, 400, 200))
+    exif = Image.Exif()
+    exif[274] = 6
+    path = tmp_path / "portrait.jpg"
+    image.save(path, exif=exif)
+    clear_thumbnail_cache()
+
+    thumbnail = Image.open(io.BytesIO(scanner_module.generate_thumbnail(str(path))))
+
+    assert thumbnail.size == (128, 256)
+    # Orientation 6 means "rotate 90 degrees clockwise to display", so the
+    # red left half of the stored pixels ends up on top.
+    top, bottom = thumbnail.getpixel((64, 32)), thumbnail.getpixel((64, 224))
+    assert top[0] > 200 and top[2] < 60
+    assert bottom[2] > 200 and bottom[0] < 60
+
+
+def test_pixel_budget_makes_a_large_request_wait_for_room():
+    budget = scanner_module._PixelBudget(100)
+    events = []
+    first_holding = threading.Event()
+    release_first = threading.Event()
+
+    def first():
+        with budget.reserve(60) as granted:
+            events.append(("first", granted))
+            first_holding.set()
+            release_first.wait(5)
+
+    def second():
+        first_holding.wait(5)
+        with budget.reserve(60) as granted:
+            events.append(("second", granted))
+
+    threads = [threading.Thread(target=first), threading.Thread(target=second)]
+    for thread in threads:
+        thread.start()
+    first_holding.wait(5)
+    threading.Event().wait(0.2)
+    assert events == [("first", True)]
+
+    release_first.set()
+    for thread in threads:
+        thread.join(5)
+    assert events == [("first", True), ("second", True)]
+
+
+def test_pixel_budget_runs_an_oversized_image_alone_and_gives_up_on_cancel():
+    budget = scanner_module._PixelBudget(100)
+    cancel_event = threading.Event()
+    with budget.reserve(500) as granted:
+        assert granted
+        cancel_event.set()
+        with budget.reserve(1, cancel_event) as waiting_granted:
+            assert waiting_granted is False
+    with budget.reserve(100) as granted:
+        assert granted
+
+
+def test_similar_scan_keeps_concurrent_decodes_within_the_pixel_budget(tmp_path, monkeypatch):
+    # M7: every worker used to decode a full-size image at the same time.
+    paths = []
+    for index in range(6):
+        path = tmp_path / f"img{index}.png"
+        create_image(path, size=(100, 100), color=(index * 40, 0, 0))
+        paths.append(str(path))
+    monkeypatch.setattr(scanner_module, "_decode_budget", scanner_module._PixelBudget(2 * 100 * 100))
+    real_phash = scanner_module.imagehash.phash
+    lock = threading.Lock()
+    running = peak = 0
+
+    def slow_phash(image):
+        nonlocal running, peak
+        with lock:
+            running += 1
+            peak = max(peak, running)
+        try:
+            threading.Event().wait(0.05)
+            return real_phash(image)
+        finally:
+            with lock:
+                running -= 1
+
+    monkeypatch.setattr(scanner_module.imagehash, "phash", slow_phash)
+    results = list(Scanner(max_workers=6)._iter_parallel_results(paths, get_image_phash))
+
+    assert peak == 2
+    assert sorted(path for path, phash in results if phash) == paths
+
+
+def test_thumbnail_reserves_the_reduced_jpeg_decode_and_composites_after_shrinking(tmp_path, monkeypatch):
+    reserved = []
+    real_budget = scanner_module._PixelBudget(10**9)
+
+    class RecordingBudget:
+        def reserve(self, pixels, cancel_event=None):
+            reserved.append(pixels)
+            return real_budget.reserve(pixels, cancel_event)
+
+    monkeypatch.setattr(scanner_module, "_decode_budget", RecordingBudget())
+    jpeg = tmp_path / "large.jpg"
+    png = tmp_path / "large.png"
+    create_image(jpeg, size=(1600, 1200))
+    create_image(png, mode="RGBA", size=(1600, 1200), color=(0, 0, 255, 0))
+    clear_thumbnail_cache()
+
+    assert scanner_module.generate_thumbnail(str(jpeg))
+    png_thumbnail = scanner_module.generate_thumbnail(str(png))
+
+    # JPEG decodes at 1/4 scale for a 256 px box; PNG has no reduced decode.
+    assert reserved == [400 * 300, 1600 * 1200]
+    with Image.open(io.BytesIO(png_thumbnail)) as thumbnail:
+        assert thumbnail.size == (256, 192)
+        assert all(channel > 235 for channel in thumbnail.getpixel((128, 96)))
+
+
+def test_scan_directory_does_not_loop_through_a_directory_symlink(tmp_path):
+    # M9: a portable counterpart of the junction cycle test above.
+    d1 = tmp_path / "d1"
+    d2 = d1 / "d2"
+    d2.mkdir(parents=True)
+    image = d1 / "img1.jpg"
+    create_image(image)
+    _symlink_or_skip(d2 / "back_to_d1", d1)
+
+    files, _, skipped = Scanner()._enumerate_image_files(str(d1), collect_sizes=False)
+    results = []
+    Scanner().scan_directory(str(d1), "exact", lambda event, data: results.append((event, data)))
+
+    assert files == [str(image)]
+    assert skipped == 0
+    assert results[-1][0] == "done"
+
+
+def test_exact_scan_decides_up_to_64_kib_by_prefix_and_full_hashes_larger_files(tmp_path, monkeypatch):
+    # M10: the funnel boundary is "size <= PREFIX_HASH_SIZE".
+    limit = scanner_module.PREFIX_HASH_SIZE
+    payload = os.urandom(limit) + b"\x02"
+    contents = {
+        "at_limit_a.jpg": payload[:limit],
+        "at_limit_b.jpg": payload[:limit],
+        "over_same_a.jpg": payload,
+        "over_same_b.jpg": payload,
+        "over_diff_a.jpg": payload[:limit] + b"\x00",
+        "over_diff_b.jpg": payload[:limit] + b"\x01",
+    }
+    for name, content in contents.items():
+        (tmp_path / name).write_bytes(content)
+    fully_hashed = []
+    real_get_file_hash = scanner_module.get_file_hash
+
+    def recording_get_file_hash(path, cancel_event=None):
+        fully_hashed.append(os.path.basename(path))
+        return real_get_file_hash(path, cancel_event)
+
+    monkeypatch.setattr(scanner_module, "get_file_hash", recording_get_file_hash)
+    events = []
+    Scanner(max_workers=2).scan_directory(str(tmp_path), "exact", lambda event, data: events.append((event, data)))
+
+    groups = [[os.path.basename(path) for path in group] for group in events[-1][1]["exact"]]
+    assert groups == [["at_limit_a.jpg", "at_limit_b.jpg"], ["over_same_a.jpg", "over_same_b.jpg"]]
+    assert sorted(fully_hashed) == ["over_diff_a.jpg", "over_diff_b.jpg", "over_same_a.jpg", "over_same_b.jpg"]
+
+
+class _CancelAfter:
+    """An Event stand-in that reports cancellation from the n-th check on."""
+
+    def __init__(self, checks):
+        self.remaining = checks
+
+    def is_set(self):
+        self.remaining -= 1
+        return self.remaining < 0
+
+
+def test_hashing_stops_and_returns_empty_when_cancelled_midway(tmp_path):
+    big_file = tmp_path / "big.jpg"
+    big_file.write_bytes(os.urandom(scanner_module.HASH_CHUNK_SIZE * 4))
+    image = tmp_path / "image.png"
+    create_image(image)
+
+    cancelled_after_two_chunks = _CancelAfter(checks=2)
+    assert get_file_hash(str(big_file), cancelled_after_two_chunks) == ""
+    assert cancelled_after_two_chunks.remaining < 0
+    assert get_file_hash(str(big_file), _CancelAfter(checks=10**6)) == get_file_hash(str(big_file))
+
+    cancelled = threading.Event()
+    cancelled.set()
+    assert scanner_module.get_file_prefix_hash(str(big_file), cancelled) == ""
+    assert get_image_phash(str(image), cancelled) == ""
+
+
+def test_a_failing_done_callback_does_not_escape_the_scan_thread(tmp_path):
+    create_image(tmp_path / "a.jpg")
+    calls = []
+
+    def callback(event, data):
+        calls.append(event)
+        if event == "done" and calls.count("done") == 1:
+            raise RuntimeError("callback failed")
+
+    scanner = Scanner()
+    scanner.scan_directory(str(tmp_path), "exact", callback)
+
+    assert "done" in calls
+    assert scanner.is_scanning is False
+
+
+@pytest.mark.parametrize("size", [1_000, 65_536, 70_000])
+def test_prefix_hash_covers_exactly_the_first_64_kib(tmp_path, size):
+    import hashlib
+
+    data = os.urandom(size)
+    path = tmp_path / "file.jpg"
+    path.write_bytes(data)
+
+    expected = hashlib.sha256(data[:scanner_module.PREFIX_HASH_SIZE]).hexdigest()
+    assert scanner_module.get_file_prefix_hash(str(path)) == expected
+
+
+@pytest.mark.parametrize(("size", "expected_length"), [(1_000, 1_000), (65_536, 65_536), (70_000, 65_537)])
+def test_prefix_read_reports_the_file_length_up_to_one_byte_past_the_prefix(tmp_path, size, expected_length):
+    path = tmp_path / "file.jpg"
+    path.write_bytes(os.urandom(size))
+
+    prefix_hash, bytes_read = scanner_module.get_file_prefix_hash_and_length(str(path))
+
+    assert bytes_read == expected_length
+    assert prefix_hash == scanner_module.get_file_prefix_hash(str(path))

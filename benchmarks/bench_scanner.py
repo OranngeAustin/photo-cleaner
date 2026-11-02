@@ -183,7 +183,7 @@ def bench_parallel(items: int) -> tuple[Callable[[], object], Callable[[], None]
     return (lambda: list(scanner._iter_parallel_results(filepaths, worker))), (lambda: None)
 
 
-def bench_result_keys(paths_count: int) -> tuple[Callable[[], object], Callable[[], None]]:
+def _make_result_groups(paths_count: int) -> tuple[Path, dict[str, list[list[str]]]]:
     root = Path(tempfile.mkdtemp(prefix="bench-keys-"))
     groups: list[list[str]] = []
     for index in range(0, paths_count, 2):
@@ -195,10 +195,24 @@ def bench_result_keys(paths_count: int) -> tuple[Callable[[], object], Callable[
             path.write_bytes(b"x")
             pair.append(str(path))
         groups.append(pair)
+    return root, {"exact": groups, "similar": []}
+
+
+def bench_result_keys(paths_count: int) -> tuple[Callable[[], object], Callable[[], None]]:
+    root, results = _make_result_groups(paths_count)
     import main  # noqa: PLC0415 - imported lazily because it pulls in pywebview
 
-    results = {"exact": groups, "similar": []}
     return (lambda: main._collect_result_path_keys(results, "exact")), (
+        lambda: shutil.rmtree(root, ignore_errors=True)
+    )
+
+
+def bench_result_fingerprints(paths_count: int) -> tuple[Callable[[], object], Callable[[], None]]:
+    """What a finished scan now does: whitelist keys plus one stat per result."""
+    root, results = _make_result_groups(paths_count)
+    import main  # noqa: PLC0415 - imported lazily because it pulls in pywebview
+
+    return (lambda: main._collect_result_fingerprints(results, "exact")), (
         lambda: shutil.rmtree(root, ignore_errors=True)
     )
 
@@ -211,6 +225,9 @@ BENCHMARKS: dict[str, tuple[Callable[[int], tuple[Callable[[], object], Callable
     "thumbnail": (bench_thumbnail, 60, "generate_thumbnail cold cache, 60 JPEG 1600x1200"),
     "parallel": (bench_parallel, 20_000, "_iter_parallel_results scheduling, 20k no-op items"),
     "result_keys": (bench_result_keys, 20_000, "main._collect_result_path_keys, 20k result paths"),
+    "result_fingerprints": (
+        bench_result_fingerprints, 20_000, "main._collect_result_fingerprints, 20k result paths"
+    ),
 }
 
 

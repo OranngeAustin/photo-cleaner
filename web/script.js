@@ -29,22 +29,22 @@ const scrollContainer = document.getElementById('scroll-container');
 
 // Tab Switching
 tabs.forEach(tab => {
-    tab.addEventListener('click', () => {
+    tab.addEventListener('click', async () => {
+        const mode = tab.dataset.tab;
         tabs.forEach(t => t.classList.remove('active'));
         tabContents.forEach(c => c.classList.remove('active'));
         tab.classList.add('active');
         document.getElementById(`tab-${tab.dataset.tab}`).classList.add('active');
-        currentFocus.tab = tab.dataset.tab;
-        updateFocusUI();
-        
+        focusFirstVisibleRow(mode);
+
         // Auto-scan if folder is chosen and this tab has no data yet
-        if (currentDirectory) {
-            if (currentFocus.tab === 'exact' && exactData.length === 0) {
-                startScan(currentDirectory, 'exact');
-            } else if (currentFocus.tab === 'similar' && similarData.length === 0) {
-                startScan(currentDirectory, 'similar');
-            }
-        }
+        const tabData = mode === 'exact' ? exactData : similarData;
+        if (!currentDirectory || tabData.length > 0) return;
+        // Finish a staged delete first, or the new results could still list
+        // the files it is about to remove.
+        await commitPendingDeletion();
+        // The user may have switched tabs again while the delete was running.
+        if (currentFocus.tab === mode) startScan(currentDirectory, mode);
     });
 });
 
@@ -269,13 +269,9 @@ function stageBulkDeletion(tabName, rows, paths, toastMessage) {
         rows,
         paths,
         timerId: setTimeout(() => commitPendingDeletion(), 3000),
-        committing: false
+        committing: false,
+        focus: moveFocusOffHiddenRows(tabName)
     };
-
-    if (currentFocus.tab === tabName) {
-        currentFocus = { rowIdx: -1, imgIdx: -1, tab: tabName };
-        updateFocusUI();
-    }
     showToast(toastMessage);
     return true;
 }
@@ -348,6 +344,9 @@ browseBtn.addEventListener('click', async () => {
     if (window.pywebview && window.pywebview.api) {
         const folder = await window.pywebview.api.choose_directory();
         if (folder) {
+            // Finish a staged delete while its folder is still the authorized
+            // scan root; the scan below replaces that root.
+            await commitPendingDeletion();
             currentDirectory = folder;
             currentDirSpan.textContent = folder;
             // Clear old data
@@ -535,6 +534,34 @@ function showLightbox(path) {
 
 // Undo & Clean Logic
 
+// Hiding the focused group must not leave the keyboard without a target: move
+// to the nearest visible group and remember where focus was, for undo.
+function moveFocusOffHiddenRows(tabName) {
+    if (currentFocus.tab !== tabName || currentFocus.rowIdx < 0) return null;
+    const focusedRow = document.getElementById(`row-${tabName}-${currentFocus.rowIdx}`);
+    if (focusedRow && focusedRow.style.display !== 'none') return null;
+
+    const previous = { ...currentFocus };
+    const rows = visibleRows(tabName);
+    const target = rows.find(row => Number(row.dataset.rowIdx) > previous.rowIdx)
+        || rows.reverse().find(row => Number(row.dataset.rowIdx) < previous.rowIdx);
+    currentFocus = target
+        ? { rowIdx: Number(target.dataset.rowIdx), imgIdx: 0, tab: tabName }
+        : { rowIdx: -1, imgIdx: -1, tab: tabName };
+    updateFocusUI();
+    return { previous, staged: { ...currentFocus } };
+}
+
+// Undo (or a failed delete) returns focus to the restored group, unless the
+// user has already moved it somewhere else.
+function restoreFocusAfterUndo(deletion) {
+    const saved = deletion.focus;
+    if (!saved || currentFocus.tab !== saved.previous.tab) return;
+    if (currentFocus.rowIdx !== saved.staged.rowIdx || currentFocus.imgIdx !== saved.staged.imgIdx) return;
+    currentFocus = { ...saved.previous };
+    updateFocusUI();
+}
+
 function restorePendingDeletion(deletion) {
     deletion.rows.forEach(row => {
         row.style.display = 'flex';
@@ -586,13 +613,20 @@ function removeDeletedPathsFromCachedResults(deletedPaths) {
     });
 }
 
-async function commitPendingDeletion() {
+// Returns the in-flight request, so callers can wait for a delete that the
+// undo timer (or another caller) has already started.
+function commitPendingDeletion() {
     const deletion = pendingDeletion;
-    if (!deletion || deletion.committing) return;
+    if (!deletion) return Promise.resolve();
+    if (!deletion.committing) {
+        clearTimeout(deletion.timerId);
+        deletion.committing = true;
+        deletion.request = sendPendingDeletion(deletion);
+    }
+    return deletion.request || Promise.resolve();
+}
 
-    clearTimeout(deletion.timerId);
-    deletion.committing = true;
-
+async function sendPendingDeletion(deletion) {
     try {
         const response = await fetch('/api/delete', {
             method: 'POST',
@@ -613,6 +647,8 @@ async function commitPendingDeletion() {
             removeDeletedPathsFromCachedResults(deletedPaths);
         }
         restorePendingDeletion(deletion);
+        // A re-render (above) already reset focus; otherwise the rows are back as they were.
+        if (deletedPaths.size === 0) restoreFocusAfterUndo(deletion);
 
         const failedCount = deletion.paths.filter(path => !deletedPaths.has(path)).length;
         if (failedCount > 0) {
@@ -622,6 +658,7 @@ async function commitPendingDeletion() {
         }
     } catch (error) {
         restorePendingDeletion(deletion);
+        restoreFocusAfterUndo(deletion);
         showToast('\u26A0 Delete failed. The photos remain visible and can be retried.');
     } finally {
         if (pendingDeletion === deletion) {
@@ -633,9 +670,11 @@ async function commitPendingDeletion() {
 function undoPendingDeletion() {
     if (!pendingDeletion || pendingDeletion.committing) return;
 
-    clearTimeout(pendingDeletion.timerId);
-    restorePendingDeletion(pendingDeletion);
+    const deletion = pendingDeletion;
+    clearTimeout(deletion.timerId);
+    restorePendingDeletion(deletion);
     pendingDeletion = null;
+    restoreFocusAfterUndo(deletion);
     hideToast();
 }
 
@@ -674,13 +713,9 @@ function triggerClean(tabName, rIdx) {
         rows: [row],
         paths: toDelete,
         timerId: setTimeout(() => commitPendingDeletion(), 3000),
-        committing: false
+        committing: false,
+        focus: moveFocusOffHiddenRows(tabName)
     };
-
-    if (currentFocus.tab === tabName && currentFocus.rowIdx === rIdx) {
-        currentFocus = { rowIdx: -1, imgIdx: -1, tab: tabName };
-        updateFocusUI();
-    }
     showToast(`${toDelete.length} photos marked; moving to Recycle Bin in 3 seconds.`);
 }
 
@@ -703,6 +738,21 @@ function updateFocusUI() {
             item.scrollIntoView({ block: 'nearest', inline: 'nearest' });
         }
     }
+}
+
+function visibleRows(tabName) {
+    return Array.from(document.querySelectorAll(`#tab-${tabName} .group-row`))
+        .filter(row => row.style.display !== 'none');
+}
+
+// Row indexes belong to one tab, so a focus carried over from the other tab
+// (or from before a re-render) can point past this tab's groups.
+function focusFirstVisibleRow(tabName) {
+    const [row] = visibleRows(tabName);
+    currentFocus = row
+        ? { rowIdx: Number(row.dataset.rowIdx), imgIdx: 0, tab: tabName }
+        : { rowIdx: -1, imgIdx: -1, tab: tabName };
+    updateFocusUI();
 }
 
 // Rows scroll inside #scroll-container, below the fixed header, so visibility
@@ -760,6 +810,10 @@ document.addEventListener('keydown', (e) => {
     const tabName = currentFocus.tab;
     const data = tabName === 'exact' ? exactData : similarData;
     if (data.length === 0 || currentFocus.rowIdx < 0) return;
+    if (!data[currentFocus.rowIdx]) {
+        focusFirstVisibleRow(tabName);
+        return;
+    }
 
     let { rowIdx, imgIdx } = currentFocus;
     const k = e.key.toLowerCase();
