@@ -1,3 +1,4 @@
+import asyncio
 import os
 import subprocess
 import sys
@@ -340,3 +341,66 @@ def test_a_finished_scan_records_the_fingerprints_that_delete_checks(tmp_path, m
     finally:
         _restore_scan_state(saved_state)
         main.result_fingerprints_by_mode = saved_fingerprints
+
+
+def _asgi_status(method, path, headers):
+    """Send one request through the full ASGI stack and return its status."""
+    sent = []
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+        "method": method, "scheme": "http", "path": path, "raw_path": path.encode(),
+        "query_string": b"", "root_path": "",
+        "headers": [(name.encode(), value.encode()) for name, value in headers.items()],
+        "client": ("127.0.0.1", 50000), "server": ("127.0.0.1", 8000),
+    }
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(main.app(scope, receive, send))
+    return sent[0]["status"]
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "headers"),
+    [
+        # DNS rebinding: the attacker's name now resolves to 127.0.0.1.
+        ("POST", "/api/cancel_scan", {"host": "attacker.example:8000", "origin": "http://attacker.example:8000"}),
+        ("GET", "/api/scan_status", {"host": "attacker.example:8000"}),
+        ("GET", "/", {"host": "attacker.example:8000"}),
+        # Another site posting straight to the loopback port (L14).
+        ("POST", "/api/cancel_scan", {"host": "127.0.0.1:8000", "origin": "http://evil.example"}),
+        ("POST", "/api/cancel_scan", {"host": "127.0.0.1:8000", "origin": "null"}),
+        ("POST", "/api/cancel_scan", {"host": "127.0.0.1:8000", "origin": "http://localhost:8000"}),
+        ("GET", "/api/scan_status", {}),
+    ],
+)
+def test_requests_from_other_hosts_or_origins_are_rejected(method, path, headers):
+    # M11
+    saved_state = _save_scan_state()
+    try:
+        main.active_scanner = None
+        assert _asgi_status(method, path, headers) == 403
+    finally:
+        _restore_scan_state(saved_state)
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"host": "127.0.0.1:8000", "origin": "http://127.0.0.1:8000"},
+        {"host": "127.0.0.1:8000"},
+        {"host": "localhost:8000", "origin": "http://localhost:8000"},
+    ],
+)
+def test_requests_from_the_app_page_are_accepted(headers):
+    saved_state = _save_scan_state()
+    try:
+        main.active_scanner = None
+        assert _asgi_status("POST", "/api/cancel_scan", headers) == 200
+        assert _asgi_status("GET", "/api/scan_status", {"host": headers["host"]}) == 200
+    finally:
+        _restore_scan_state(saved_state)

@@ -10,7 +10,7 @@ from typing import Literal, List
 import uvicorn
 import webview
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import ExifTags, Image, UnidentifiedImageError
 from pydantic import BaseModel
@@ -28,7 +28,57 @@ def _resource_dir() -> Path:
     return Path(getattr(sys, "_MEIPASS", PROJECT_DIR))
 
 
+# The server only listens on 127.0.0.1, but a browser can still be steered at
+# it.  DNS rebinding: a page on attacker.example re-points its own name at
+# 127.0.0.1 and then calls this API as a same-origin page; its requests still
+# carry "Host: attacker.example".  Any other site can also post straight to
+# http://127.0.0.1:<port>; those requests carry that site's Origin.
+TRUSTED_HOSTS = frozenset({"127.0.0.1", "localhost"})
+
+
+def _host_name(host_header: str) -> str:
+    """Return the lower-cased host name of a Host header, without the port."""
+    host = host_header.strip().lower()
+    if host.startswith("["):
+        return host[1:host.find("]")] if "]" in host else host
+    return host.split(":", 1)[0]
+
+
+def _is_trusted_request(headers: dict[str, str]) -> bool:
+    host = headers.get("host", "")
+    if _host_name(host) not in TRUSTED_HOSTS:
+        return False
+    # Browsers send Origin on cross-origin requests and on same-origin POSTs;
+    # the app's own page always sends exactly its own origin.
+    origin = headers.get("origin")
+    return origin is None or origin.strip().lower() == f"http://{host.strip().lower()}"
+
+
+class LocalRequestGuard:
+    """Reject HTTP requests that did not come from the app's own page."""
+
+    def __init__(self, asgi_app):
+        self.app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            headers = {
+                name.decode("latin-1").lower(): value.decode("latin-1")
+                for name, value in scope["headers"]
+            }
+            if not _is_trusted_request(headers):
+                logger.warning(
+                    "Rejected request with Host %r and Origin %r",
+                    headers.get("host"),
+                    headers.get("origin"),
+                )
+                await PlainTextResponse("Forbidden", status_code=403)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 app = FastAPI()
+app.add_middleware(LocalRequestGuard)
 thumbnail_scanner = Scanner()
 scan_lock = threading.Lock()
 active_scanner: Scanner | None = None
