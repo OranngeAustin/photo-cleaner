@@ -222,6 +222,31 @@ def test_server_config_starts_without_console_streams():
     assert completed.returncode == 0, completed.stderr
 
 
+def test_a_build_without_a_console_still_writes_warnings_to_a_log_file(tmp_path):
+    """W11: with no console, every warning used to end up in os.devnull."""
+    script = textwrap.dedent(
+        f"""
+        import sys
+        sys.stdout = None
+        sys.stderr = None
+        import main
+        main._ensure_std_streams()
+        main._configure_logging({str(tmp_path)!r})
+        main.logger.warning("Rejected request with Host %r", "evil.example")
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    log_text = (tmp_path / main.LOG_FILE_NAME).read_text(encoding="utf-8")
+    assert "Rejected request with Host 'evil.example'" in log_text
+
+
 def _original_result_path_keys(results, mode):
     """The pre-optimisation definition, kept as the characterisation oracle."""
     return {main._path_key(path) for group in results.get(mode, []) for path in group}

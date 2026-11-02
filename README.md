@@ -90,6 +90,8 @@ pyinstaller -F -w --name PhotoCleaner --add-data "web;web" main.py
 
 `--add-data "web;web"` 会把前端页面、脚本和样式一并放入单文件程序；程序启动时会自动从 PyInstaller 的解包目录读取这些资源。
 
+`-w` 打包的程序没有控制台，警告和错误会写进 `%LOCALAPPDATA%\PhotoCleaner\photo-cleaner.log`（满 1 MB 轮换，保留 2 份旧日志）。遇到问题时先看这个文件。
+
 ## 📝 开发与维护
 
 * 后端入口文件为 `main.py`

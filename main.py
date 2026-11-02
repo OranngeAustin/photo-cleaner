@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Literal, List
 
@@ -447,6 +448,40 @@ def _ensure_std_streams() -> None:
             setattr(sys, stream_name, open(os.devnull, "w", encoding="utf-8"))
 
 
+LOG_FILE_NAME = "photo-cleaner.log"
+
+
+def _default_log_dir() -> Path:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    return Path(local_app_data) / "PhotoCleaner" if local_app_data else Path.home() / ".photo-cleaner"
+
+
+def _configure_logging(log_dir: str | os.PathLike | None = None) -> Path | None:
+    """Send warnings to the console and to a small rotating log file.
+
+    A windowed build has no console, so without the file every warning
+    (rejected requests, failed deletes, a server that never started) is lost.
+    Returns the log file's path, or None if it could not be created.
+    """
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.WARNING)
+    console = logging.StreamHandler(sys.stderr)
+    console.setFormatter(formatter)
+    root.addHandler(console)
+
+    log_path = Path(log_dir or _default_log_dir()) / LOG_FILE_NAME
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(log_path, maxBytes=1_000_000, backupCount=2, encoding="utf-8")
+    except OSError:
+        logger.warning("Cannot write the log file %s", log_path, exc_info=True)
+        return None
+    file_handler.setFormatter(formatter)
+    root.addHandler(file_handler)
+    return log_path
+
+
 def _server_url_when_ready(server: uvicorn.Server, timeout_seconds: float = 8.0) -> str | None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -462,14 +497,17 @@ def _server_url_when_ready(server: uvicorn.Server, timeout_seconds: float = 8.0)
 
 if __name__ == '__main__':
     _ensure_std_streams()
-    # Port zero asks the operating system for an unused loopback port.
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error"))
+    _configure_logging()
+    # Port zero asks the operating system for an unused loopback port.  With
+    # log_config=None uvicorn's own errors reach the handlers set up above.
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error", log_config=None))
     server_thread = threading.Thread(target=server.run, daemon=True)
     server_thread.start()
 
     server_url = _server_url_when_ready(server)
     if server_url is None:
         server.should_exit = True
+        logger.error("Photo Cleaner server did not become ready within 8 seconds")
         raise RuntimeError("Photo Cleaner server did not become ready within 8 seconds")
 
     webview.create_window('Photo Cleaner UI', server_url, width=1200, height=800, js_api=api)
