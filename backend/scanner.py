@@ -2,9 +2,10 @@ import hashlib
 import io
 import logging
 import os
+import queue
 import threading
 from collections import defaultdict
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor
 from functools import lru_cache
 from typing import Callable, Dict, Iterator
 
@@ -259,16 +260,22 @@ class Scanner:
         worker_count = self._worker_count()
         max_in_flight = worker_count * 2
         file_iterator = iter(filepaths)
+        # Each future reports itself here when it finishes.  Waiting on one
+        # queue is O(1) per file, whereas wait(FIRST_COMPLETED) re-arms a
+        # waiter on every in-flight future after each completion.
+        finished: queue.SimpleQueue[Future] = queue.SimpleQueue()
 
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            pending: dict[object, str] = {}
+            pending: dict[Future, str] = {}
 
             def submit_next() -> bool:
                 try:
                     filepath = next(file_iterator)
                 except StopIteration:
                     return False
-                pending[executor.submit(worker, filepath, self._cancel_event)] = filepath
+                future = executor.submit(worker, filepath, self._cancel_event)
+                pending[future] = filepath
+                future.add_done_callback(finished.put)
                 return True
 
             for _ in range(min(max_in_flight, len(filepaths))):
@@ -280,17 +287,15 @@ class Scanner:
                         future.cancel()
                     return
 
-                completed, _ = wait(pending, return_when=FIRST_COMPLETED)
-                for future in completed:
-                    filepath = pending.pop(future)
-                    try:
-                        result = future.result()
-                    except Exception:
-                        logger.warning("Worker failed for file: %s", filepath, exc_info=True)
-                        result = ""
-                    yield filepath, result
-                    if self.cancel_requested:
-                        break
+                future = finished.get()
+                filepath = pending.pop(future)
+                try:
+                    result = future.result()
+                except Exception:
+                    logger.warning("Worker failed for file: %s", filepath, exc_info=True)
+                    result = ""
+                yield filepath, result
+                if not self.cancel_requested:
                     submit_next()
 
     def _finish(self, callback: Callable[[str, Dict], None], data: Dict) -> None:
