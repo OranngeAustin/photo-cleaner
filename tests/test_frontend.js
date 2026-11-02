@@ -1002,3 +1002,181 @@ test('new clean actions are ignored while a delete is being committed', async ()
     await commit;
     assert.equal(runtime.api.getPendingDeletion(), null);
 });
+
+test('the post-scan message timer does not hide the progress of a newer scan', async () => {
+    let statusCalls = 0;
+    const runtime = createRuntime(async url => {
+        if (url === '/api/scan') return { ok: true, json: async () => ({ status: 'started' }) };
+        statusCalls += 1;
+        const done = statusCalls === 1;
+        return {
+            ok: true,
+            json: async () => ({ done, message: 'Scanning...', progress: {}, cancelled: false, results: { exact: [], similar: [] } }),
+        };
+    });
+    runtime.window.pywebview = { api: { choose_directory: async () => '/photos' } };
+    runtime.elements.browseBtn.dispatch('click');
+    await flushPromises();
+    // "No duplicate photos found." stays up for five seconds.
+    const hideTimer = runtime.scheduledCallbacks.find(entry => entry.delay === 5000);
+    assert.ok(hideTimer);
+
+    // Within those five seconds, opening the empty similar tab starts its scan.
+    runtime.document.querySelectorAll('.tab-btn')[1].dispatch('click');
+    await flushPromises();
+    assert.equal(runtime.elements.statusBar.classList.contains('hidden'), false);
+
+    hideTimer.callback();
+    assert.equal(runtime.elements.statusBar.classList.contains('hidden'), false);
+});
+
+function flakyStatusFetch(requests, failuresBeforeDone) {
+    let statusCalls = 0;
+    return async (url, options = {}) => {
+        requests.push({ url, method: options.method || 'GET' });
+        if (url === '/api/scan') return { ok: true, json: async () => ({ status: 'started' }) };
+        if (url === '/api/scan_status') {
+            statusCalls += 1;
+            if (statusCalls <= failuresBeforeDone) throw new Error('Failed to fetch');
+            const results = { exact: [['a1.jpg', 'a2.jpg']], similar: [] };
+            return { ok: true, json: async () => ({ done: true, message: '', progress: {}, cancelled: false, results }) };
+        }
+        return { ok: true, json: async () => ({ status: 'cancelling' }) };
+    };
+}
+
+test('a single failed status poll retries instead of abandoning the scan', async () => {
+    const requests = [];
+    const runtime = createRuntime(flakyStatusFetch(requests, 1));
+    runtime.window.pywebview = { api: { choose_directory: async () => '/photos' } };
+    runtime.elements.browseBtn.dispatch('click');
+    await flushPromises();
+
+    assert.equal(runtime.elements.browseBtn.disabled, true);
+    const retry = runtime.scheduledCallbacks.at(-1);
+    assert.equal(retry.delay, 500);
+    retry.callback();
+    await flushPromises();
+
+    assert.equal(runtime.elements.browseBtn.disabled, false);
+    assert.equal(runtime.elements.exactList.children.length, 1);
+    assert.equal(requests.some(request => request.url === '/api/cancel_scan'), false);
+});
+
+test('status polling gives up after repeated failures and cancels the backend scan', async () => {
+    const requests = [];
+    const runtime = createRuntime(flakyStatusFetch(requests, Infinity));
+    runtime.window.pywebview = { api: { choose_directory: async () => '/photos' } };
+    runtime.elements.browseBtn.dispatch('click');
+    await flushPromises();
+
+    const retryDelays = [];
+    for (let i = 0; i < 10 && runtime.elements.browseBtn.disabled; i++) {
+        const timer = runtime.scheduledCallbacks.pop();
+        retryDelays.push(timer.delay);
+        timer.callback();
+        await flushPromises();
+    }
+
+    assert.deepEqual(retryDelays, [500, 1000, 2000, 4000]);
+    assert.equal(runtime.elements.browseBtn.disabled, false);
+    assert.ok(runtime.elements.statusText.textContent.startsWith('⚠'));
+    assert.deepEqual(
+        requests.filter(request => request.url === '/api/cancel_scan').map(request => request.method),
+        ['POST']
+    );
+});
+
+test('committing a delete keeps keyboard focus on the group the user was on', async () => {
+    const runtime = createRuntime(recordingDeleteFetch([]));
+    const groups = [['a1.jpg', 'a2.jpg'], ['b1.jpg', 'b2.jpg'], ['c1.jpg', 'c2.jpg'], ['d1.jpg', 'd2.jpg']];
+    runtime.api.setExactData(groups);
+    runtime.api.renderList(groups, runtime.elements.exactList, 'exact');
+    runtime.api.setFocus('exact', 2, 0);
+    runtime.document.dispatch('keydown', { key: 'Delete' });
+    runtime.document.dispatch('keydown', { key: 'd' });
+    assert.deepEqual(runtime.api.getFocus(), { rowIdx: 3, imgIdx: 1, tab: 'exact' });
+
+    await runtime.api.commitPendingDeletion();
+
+    // Group c is gone, so d2 is now in the third row: focus stays on it
+    // instead of jumping back to the top of the list.
+    assert.deepEqual(runtime.api.snapshot().exactData, [['a1.jpg', 'a2.jpg'], ['b1.jpg', 'b2.jpg'], ['d1.jpg', 'd2.jpg']]);
+    assert.deepEqual(runtime.api.getFocus(), { rowIdx: 2, imgIdx: 1, tab: 'exact' });
+});
+
+test('a second clean within the undo window joins the first instead of undoing it', () => {
+    const runtime = createRuntime(async () => ({ ok: true, json: async () => ({}) }));
+    const rows = renderExactRowsForDelete(runtime);
+    runtime.api.setFocus('exact', 0, 0);
+
+    runtime.document.dispatch('keydown', { key: 'Delete' });
+    runtime.document.dispatch('keydown', { key: 'Delete' });
+
+    assert.equal(rows[0].style.display, 'none');
+    assert.equal(rows[1].style.display, 'none');
+    assert.deepEqual([...runtime.api.getPendingDeletion().paths], ['a2.jpg', 'b2.jpg']);
+    assert.match(runtime.elements.toastMessage.textContent, /^2 photos marked/);
+
+    // One undo brings both groups back, with focus where the user started.
+    runtime.document.dispatch('keydown', { key: 'z', ctrlKey: true });
+    assert.equal(rows[0].style.display, 'flex');
+    assert.equal(rows[1].style.display, 'flex');
+    assert.deepEqual(runtime.api.getFocus(), { rowIdx: 0, imgIdx: 0, tab: 'exact' });
+});
+
+test('exact auto dedup keeps a group already waiting in the undo window', async () => {
+    const requests = [];
+    const runtime = createRuntime(recordingDeleteFetch(requests));
+    renderExactRowsForDelete(runtime);
+    runtime.elements.exactList.querySelectorAll('.clean-btn')[0].dispatch('click');
+
+    runtime.elements.autoDedupBtn.dispatch('click');
+    await runtime.api.commitPendingDeletion();
+
+    assert.deepEqual(requests, [['a2.jpg', 'b2.jpg', 'c2.jpg', 'c3.jpg']]);
+});
+
+test('while a delete is being committed the toast no longer offers Undo', async () => {
+    let release;
+    const runtime = createRuntime(() => new Promise(resolve => {
+        release = () => resolve({ ok: true, json: async () => ({ deleted: ['a2.jpg'], errors: [] }) });
+    }));
+    renderExactRowsForDelete(runtime);
+    runtime.elements.exactList.querySelectorAll('.clean-btn')[0].dispatch('click');
+    assert.notEqual(runtime.elements.toastUndo.style.display, 'none');
+
+    const commit = runtime.api.commitPendingDeletion();
+    assert.equal(runtime.elements.toastUndo.style.display, 'none');
+    assert.match(runtime.elements.toastMessage.textContent, /Recycle Bin/);
+
+    release();
+    await commit;
+    assert.equal(runtime.elements.toastContainer.classList.contains('show'), false);
+});
+
+test('a failed delete message has no Undo and hides itself unless a newer toast replaced it', async () => {
+    const runtime = createRuntime(async () => {
+        throw new Error('offline');
+    });
+    renderExactRowsForDelete(runtime);
+    runtime.elements.exactList.querySelectorAll('.clean-btn')[0].dispatch('click');
+    await runtime.api.commitPendingDeletion();
+
+    assert.match(runtime.elements.toastMessage.textContent, /^⚠ Delete failed/);
+    assert.equal(runtime.elements.toastUndo.style.display, 'none');
+    const hideTimer = runtime.scheduledCallbacks.filter(entry => entry.delay === 5000).at(-1);
+    assert.ok(hideTimer);
+    hideTimer.callback();
+    assert.equal(runtime.elements.toastContainer.classList.contains('show'), false);
+
+    // A failure message timer must not hide a newer undo toast.
+    await runtime.api.commitPendingDeletion();
+    runtime.elements.exactList.querySelectorAll('.clean-btn')[0].dispatch('click');
+    await runtime.api.commitPendingDeletion();
+    const olderTimer = runtime.scheduledCallbacks.filter(entry => entry.delay === 5000).at(-1);
+    runtime.elements.exactList.querySelectorAll('.clean-btn')[0].dispatch('click');
+    olderTimer.callback();
+    assert.equal(runtime.elements.toastContainer.classList.contains('show'), true);
+    assert.notEqual(runtime.elements.toastUndo.style.display, 'none');
+});

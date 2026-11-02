@@ -203,41 +203,40 @@ def _generate_thumbnail_cached(
     """Render a thumbnail cached by path and source file identity metadata."""
     # mtime_ns and file_size intentionally participate in the cache key.
     del mtime_ns, file_size
-    try:
-        with Image.open(image_path) as img:
-            # Read the orientation now: the conversions below drop metadata.
-            # The bounding box applies to the upright image, and only the small
-            # thumbnail is rotated, never the full-size decode.
-            transpose = _orientation_transpose(img)
-            if transpose in _SWAPS_AXES:
-                max_width, max_height = max_height, max_width
-            max_size = (max_width, max_height)
-            if img.format == 'JPEG':
-                # Decode at a reduced scale (down to 1/8); img.size reports it.
-                img.draft('RGB', max_size)
-            with _decode_budget.reserve(img.width * img.height):
-                img.load()
-                # JPEG has no alpha channel. Normalize PNG/GIF transparency first,
-                # including palette images whose transparency is a byte table.
-                if "transparency" in img.info:
-                    img = img.convert("RGBA")
-                if img.mode not in ("RGB", "RGBA", "LA"):
-                    img = img.convert("RGB")
-                img.thumbnail(max_size)
-            # Composite on a deterministic white background only after
-            # shrinking: a full-size background would double the memory.
-            if img.mode in ("RGBA", "LA"):
-                background = Image.new("RGB", img.size, "white")
-                background.paste(img, mask=img.getchannel("A"))
-                img = background
-            if transpose is not None:
-                img = img.transpose(transpose)
-            img_byte_arr = io.BytesIO()
-            img.save(img_byte_arr, format='JPEG', quality=85)
-            return img_byte_arr.getvalue()
-    except Exception:
-        logger.warning("Failed to generate thumbnail: %s", image_path, exc_info=True)
-        return b""
+    # Failures propagate on purpose: lru_cache keeps only returned values, so a
+    # file briefly locked by another process is retried on the next request
+    # instead of staying cached as an empty thumbnail.
+    with Image.open(image_path) as img:
+        # Read the orientation now: the conversions below drop metadata.
+        # The bounding box applies to the upright image, and only the small
+        # thumbnail is rotated, never the full-size decode.
+        transpose = _orientation_transpose(img)
+        if transpose in _SWAPS_AXES:
+            max_width, max_height = max_height, max_width
+        max_size = (max_width, max_height)
+        if img.format == 'JPEG':
+            # Decode at a reduced scale (down to 1/8); img.size reports it.
+            img.draft('RGB', max_size)
+        with _decode_budget.reserve(img.width * img.height):
+            img.load()
+            # JPEG has no alpha channel. Normalize PNG/GIF transparency first,
+            # including palette images whose transparency is a byte table.
+            if "transparency" in img.info:
+                img = img.convert("RGBA")
+            if img.mode not in ("RGB", "RGBA", "LA"):
+                img = img.convert("RGB")
+            img.thumbnail(max_size)
+        # Composite on a deterministic white background only after
+        # shrinking: a full-size background would double the memory.
+        if img.mode in ("RGBA", "LA"):
+            background = Image.new("RGB", img.size, "white")
+            background.paste(img, mask=img.getchannel("A"))
+            img = background
+        if transpose is not None:
+            img = img.transpose(transpose)
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format='JPEG', quality=85)
+        return img_byte_arr.getvalue()
 
 
 def clear_thumbnail_cache() -> None:
@@ -248,6 +247,10 @@ def generate_thumbnail(image_path: str, max_size: tuple[int, int] = (256, 256)) 
     try:
         real_path = os.path.realpath(image_path)
         stat_result = os.stat(real_path)
+    except OSError:
+        logger.warning("Failed to stat thumbnail source: %s", image_path, exc_info=True)
+        return b""
+    try:
         return _generate_thumbnail_cached(
             real_path,
             int(max_size[0]),
@@ -255,8 +258,8 @@ def generate_thumbnail(image_path: str, max_size: tuple[int, int] = (256, 256)) 
             stat_result.st_mtime_ns,
             stat_result.st_size,
         )
-    except OSError:
-        logger.warning("Failed to stat thumbnail source: %s", image_path, exc_info=True)
+    except Exception:
+        logger.warning("Failed to generate thumbnail: %s", image_path, exc_info=True)
         return b""
 
 
@@ -403,26 +406,39 @@ class Scanner:
             for _ in range(min(max_in_flight, len(filepaths))):
                 submit_next()
 
-            while pending:
-                if self.cancel_requested:
-                    for future in pending:
-                        future.cancel()
-                    return
+            try:
+                while pending:
+                    if self.cancel_requested:
+                        return
 
-                future = finished.get()
-                filepath = pending.pop(future)
-                try:
-                    result = future.result()
-                except Exception:
-                    logger.warning("Worker failed for file: %s", filepath, exc_info=True)
-                    result = ""
-                yield filepath, result
-                if not self.cancel_requested:
-                    submit_next()
+                    future = finished.get()
+                    filepath = pending.pop(future)
+                    try:
+                        result = future.result()
+                    except Exception:
+                        logger.warning("Worker failed for file: %s", filepath, exc_info=True)
+                        result = ""
+                    yield filepath, result
+                    if not self.cancel_requested:
+                        submit_next()
+            finally:
+                # However the loop ends (cancel, an exception in the consumer,
+                # or the consumer closing this generator early), drop queued
+                # work so leaving the executor waits only for running workers.
+                for future in pending:
+                    future.cancel()
 
     def _finish(self, callback: Callable[[str, Dict], None], data: Dict) -> None:
+        """Report done exactly once.
+
+        A failing callback is logged here rather than reaching the scan's own
+        error handler, which would report a second done.
+        """
         self.is_scanning = False
-        callback('done', data)
+        try:
+            callback('done', data)
+        except Exception:
+            logger.exception("The scan completion callback failed")
 
     def scan_directory(self, root_dir: str, mode: str, callback: Callable[[str, Dict], None]) -> None:
         """Scan a directory for exact duplicates or visually similar photos."""
@@ -510,6 +526,8 @@ class Scanner:
                         try:
                             # Match os.walk(..., followlinks=False): traverse regular
                             # directories but do not descend into symlink directories.
+                            # Windows junctions are not symlinks here, so they are
+                            # followed; seen_realpaths stops junction loops.
                             if entry.is_dir(follow_symlinks=False):
                                 stack.append(entry.path)
                                 continue

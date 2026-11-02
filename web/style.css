@@ -151,11 +151,6 @@ body {
     flex-direction: column;
     overflow: hidden;
     position: relative;
-    /* Keyboard Focus Indicator on the Row */
-}
-.group-row.focused {
-    border-color: var(--primary);
-    box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.4);
 }
 
 .group-header {

@@ -64,6 +64,26 @@
 | L12 | `main.py:96-103, 211-215` | 授权与删除之间存在 TOCTOU | 检查和使用分两次进行，删除时用的是路径字符串。如果其间父目录被换成联接点，删除就可能越出扫描根。前提是攻击者对扫描目录有写权限，属于理论风险 | 删除前用 `lstat` 复核 | 中 |
 | L13 | `requirements.txt` | 依赖没有锁定版本 | 无法复现构建；测试依赖合成图的 pHash 数值，ImageHash 和 scipy 升级后可能出现差异 | 提供 `requirements.lock`，或至少锁定主版本 | 高 |
 
+### 低风险修复状态（第三轮，分支 `claude/low-fixes`）
+
+L14 已由 M11 解决；L15 不在本轮范围（L1–L13）内，未处理。
+
+| 编号 | 状态 | commit | 说明 |
+|---|---|---|---|
+| L1 | ✅ 已修复 | `d206e6f` | M8 已把扫描结束时的 realpath/stat 移到锁外；本轮把 `delete_files` 里锁内的 `_path_key` 也移出，并用测试固定「持锁时不调用 realpath」 |
+| L2 | ✅ 已修复 | `6bc63b2` | 缓存函数不再吞掉异常（`lru_cache` 不缓存异常），由外层返回空结果，下次请求重新生成 |
+| L3 | ✅ 已修复 | `d00772c` | `_finish` 捕获回调异常，`done` 只发一次；`main.py` 扫描线程入口用 `finally` 兜底释放 `active_scanner` |
+| L4 | ✅ 已修复 | `8e781bd` | `try/finally` 中取消所有排队任务，覆盖取消、消费方异常和提前关闭生成器 |
+| L5 | ✅ 已修复（文档） | `271a3ab` | 按建议的第一种做法在 CLAUDE.md 和代码注释中写明联接点会被遍历及其后果；是否跳过仍等 Q3 决定，扫描行为未改 |
+| L6 | ✅ 已修复 | `45c135a` | 扫描结束提示与 `showScanError` 共用 `hideStatusBarLater()`，新扫描进行中时不隐藏 |
+| L7 | ✅ 部分修复 | `9f2f0b2` | 0.5/1/2/4 秒退避重试，连续 5 次失败才放弃，放弃时 `POST /api/cancel_scan`。**未加取消按钮**（新增界面功能，见 PROGRESS R3-D2） |
+| L8 | ✅ 已修复 | `b963353` | 提交后焦点留在原来的组和照片；删除后不再清空缩略图缓存。整表重新渲染保留 |
+| L9 | ✅ 已修复 | `d36d670` | 撤销窗口内的新清理动作并入待删除批次（像相似页那样合并），一次撤销全部恢复 |
+| L10 | ✅ 已修复 | `12bc399` | 提交时提示改为「正在移到回收站」并隐藏 Undo；失败提示不带 Undo，5 秒后自动隐藏 |
+| L11 | ✅ 已修复（部分不成立） | `be9ea32` | 删除 `activeCountdownId`、`countdownInterval`、`pendingDeletion.type` 和 `.group-row.focused`，抽出 `stageDeletion`。`scrollContainer`（H4 后已使用）和 `.lightbox img.zoomed`（有效规则）两项不成立，未改 |
+| L12 | ⏭ 跳过 | `dc1a847` | 修复风险过大、收益很小：`lstat` 复核只能缩小窗口，不能关闭 TOCTOU（`send2trash` 只接受路径字符串）；彻底修复要改成 Windows 专用的基于句柄的删除。利用前提苛刻，后果可还原（PROGRESS R3-D3） |
+| L13 | ✅ 已修复 | `bb91302` | 新增 `requirements.lock`（完整依赖闭包、精确版本），可选用作 `pip install -r requirements.txt -c requirements.lock`；`requirements.txt` 不变 |
+
 ## 待人工确认
 
 | 编号 | 位置 | 问题 | 为什么不确定 | 建议 |

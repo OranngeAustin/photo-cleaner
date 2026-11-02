@@ -81,6 +81,7 @@ app = FastAPI()
 app.add_middleware(LocalRequestGuard)
 thumbnail_scanner = Scanner()
 scan_lock = threading.Lock()
+SCAN_FAILED_MESSAGE = "Scan failed. Check the application log for details."
 active_scanner: Scanner | None = None
 allowed_scan_root: str | None = None
 allowed_result_paths_by_mode: dict[str, set[str]] = {
@@ -315,11 +316,24 @@ def start_scan(req: ScanRequest):
                 active_scanner = None
                 scan_state["done"] = True  # Frontend treats this as an atomic completion marker.
 
-    threading.Thread(
-        target=scan_job.scan_directory,
-        args=(scan_root, req.mode, callback),
-        daemon=True,
-    ).start()
+    def run_scan() -> None:
+        global active_scanner
+        try:
+            scan_job.scan_directory(scan_root, req.mode, callback)
+        finally:
+            # The scanner always reports done, but if handling that report
+            # failed, release the job here: otherwise every later scan is
+            # refused with 409 until the app restarts.
+            with scan_lock:
+                if active_scanner is scan_job:
+                    active_scanner = None
+                    scan_state["results"] = {"exact": [], "similar": [], "error": SCAN_FAILED_MESSAGE}
+                    scan_state["message"] = SCAN_FAILED_MESSAGE
+                    scan_state["cancelled"] = False
+                    scan_state["status"] = "idle"
+                    scan_state["done"] = True
+
+    threading.Thread(target=run_scan, daemon=True).start()
     return {"status": "started"}
 
 
@@ -360,8 +374,9 @@ def delete_files(req: DeleteRequest):
                 continue
             send2trash(real_path)
             success.append(requested_path)
+            # Resolve before taking the lock: realpath touches the file system.
+            path_key = _path_key(real_path)
             with scan_lock:
-                path_key = _path_key(real_path)
                 for paths in allowed_result_paths_by_mode.values():
                     paths.discard(path_key)
                 for fingerprints in result_fingerprints_by_mode.values():
@@ -370,8 +385,8 @@ def delete_files(req: DeleteRequest):
             logger.warning("Failed to delete file: %s", requested_path, exc_info=True)
             errors.append(requested_path)
 
-    if success:
-        clear_thumbnail_cache()
+    # The thumbnail cache is not cleared here: its key includes each file's
+    # size and mtime, and deleted paths are no longer allowed anyway.
     return {"deleted": success, "errors": errors}
 
 

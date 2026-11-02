@@ -404,3 +404,94 @@ def test_requests_from_the_app_page_are_accepted(headers):
         assert _asgi_status("GET", "/api/scan_status", {"host": headers["host"]}) == 200
     finally:
         _restore_scan_state(saved_state)
+
+
+def test_result_paths_are_resolved_outside_the_scan_lock(tmp_path, monkeypatch):
+    """L1: realpath can block on a slow or network drive. While it runs under
+    scan_lock, /api/scan_status and every file endpoint wait behind it."""
+    saved_state = _save_scan_state()
+    saved_fingerprints = {mode: dict(prints) for mode, prints in main.result_fingerprints_by_mode.items()}
+    try:
+        first = tmp_path / "a.jpg"
+        second = tmp_path / "b.jpg"
+        first.write_bytes(b"duplicate")
+        second.write_bytes(b"duplicate")
+        resolved_while_locked = []
+        real_realpath = os.path.realpath
+
+        def recording_realpath(path, *args, **kwargs):
+            resolved_while_locked.append(main.scan_lock.locked())
+            return real_realpath(path, *args, **kwargs)
+
+        monkeypatch.setattr(main.os.path, "realpath", recording_realpath)
+        main.active_scanner = None
+        assert main.start_scan(main.ScanRequest(directory=str(tmp_path), mode="exact")) == {"status": "started"}
+        deadline = time.monotonic() + 10
+        while not main.scan_state["done"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert main.scan_state["results"]["exact"] == [[str(first), str(second)]]
+
+        monkeypatch.setattr(main, "send2trash", lambda path: None)
+        response = main.delete_files(main.DeleteRequest(files=[str(second)]))
+
+        assert response == {"deleted": [str(second)], "errors": []}
+        assert resolved_while_locked and not any(resolved_while_locked)
+    finally:
+        _restore_scan_state(saved_state)
+        main.result_fingerprints_by_mode = saved_fingerprints
+
+
+def test_a_scan_whose_completion_handling_fails_does_not_block_later_scans(tmp_path, monkeypatch):
+    """L3: if handling the done event fails, the job must still be released;
+    otherwise every later scan is refused with 409 until the app restarts."""
+    saved_state = _save_scan_state()
+    saved_fingerprints = {mode: dict(prints) for mode, prints in main.result_fingerprints_by_mode.items()}
+    try:
+        (tmp_path / "a.jpg").write_bytes(b"photo")
+
+        def failing_fingerprints(results, mode):
+            raise RuntimeError("cannot record fingerprints")
+
+        monkeypatch.setattr(main, "_collect_result_fingerprints", failing_fingerprints)
+        main.active_scanner = None
+        assert main.start_scan(main.ScanRequest(directory=str(tmp_path), mode="exact")) == {"status": "started"}
+        deadline = time.monotonic() + 5
+        while not main.scan_state["done"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert main.scan_state["done"] is True
+        assert main.active_scanner is None
+        assert main.scan_state["status"] == "idle"
+        assert main.scan_state["results"]["error"]
+    finally:
+        _restore_scan_state(saved_state)
+        main.result_fingerprints_by_mode = saved_fingerprints
+
+
+def test_deleting_a_file_keeps_the_other_cached_thumbnails(tmp_path, monkeypatch):
+    """L8: the thumbnail cache key already includes each file's size and mtime,
+    so a delete need not make every visible thumbnail render again."""
+    from backend import scanner as scanner_module
+
+    saved_state = _save_scan_state()
+    try:
+        kept = tmp_path / "kept.jpg"
+        removed = tmp_path / "removed.jpg"
+        Image.new("RGB", (64, 64), "red").save(kept)
+        Image.new("RGB", (64, 64), "blue").save(removed)
+        with main.scan_lock:
+            main.allowed_scan_root = main._resolve_path(str(tmp_path))
+            main.allowed_result_paths_by_mode = {
+                "exact": {main._path_key(str(kept)), main._path_key(str(removed))},
+                "similar": set(),
+            }
+        scanner_module.clear_thumbnail_cache()
+        assert main.get_thumbnail(str(kept)).status_code == 200
+
+        monkeypatch.setattr(main, "send2trash", lambda path: None)
+        assert main.delete_files(main.DeleteRequest(files=[str(removed)]))["deleted"] == [str(removed)]
+        assert main.get_thumbnail(str(kept)).status_code == 200
+
+        assert scanner_module._generate_thumbnail_cached.cache_info().hits == 1
+    finally:
+        _restore_scan_state(saved_state)

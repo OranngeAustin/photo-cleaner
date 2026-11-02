@@ -3,6 +3,7 @@ import os
 import random
 import sys
 import threading
+import time
 import unittest.mock
 import warnings
 import pytest
@@ -696,3 +697,68 @@ def test_prefix_read_reports_the_file_length_up_to_one_byte_past_the_prefix(tmp_
 
     assert bytes_read == expected_length
     assert prefix_hash == scanner_module.get_file_prefix_hash(str(path))
+
+
+def test_a_failed_thumbnail_is_retried_on_the_next_request(tmp_path, monkeypatch):
+    """L2: a file briefly locked by another process (or a MemoryError) must not
+    leave an empty thumbnail in the cache until the next scan or delete."""
+    image = tmp_path / "a.jpg"
+    create_image(image)
+    clear_thumbnail_cache()
+    real_open = scanner_module.Image.open
+    opened = []
+
+    def flaky_open(*args, **kwargs):
+        opened.append(args[0])
+        if len(opened) == 1:
+            raise PermissionError("locked by another process")
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(scanner_module.Image, "open", flaky_open)
+
+    assert scanner_module.generate_thumbnail(str(image)) == b""
+    retried = scanner_module.generate_thumbnail(str(image))
+
+    assert len(opened) == 2
+    assert Image.open(io.BytesIO(retried)).format == "JPEG"
+
+
+def test_done_is_reported_once_even_when_the_callback_keeps_failing(tmp_path):
+    """L3: a failing done callback was caught by the scan's own error handler,
+    which sent a second done; when that failed too, the exception escaped and
+    ended the scan thread."""
+    create_image(tmp_path / "a.jpg")
+    events = []
+
+    def callback(event, data):
+        events.append(event)
+        if event == "done":
+            raise RuntimeError("callback failed")
+
+    scanner = Scanner()
+    scanner.scan_directory(str(tmp_path), "exact", callback)
+
+    assert events.count("done") == 1
+    assert scanner.is_scanning is False
+
+
+def test_closing_the_result_iterator_early_drops_queued_work():
+    """L4: when the consumer stops early for a reason other than cancel (an
+    exception in its loop body, a break), queued files must not still be
+    processed while the executor shuts down."""
+    started = []
+
+    def worker(path, cancel_event):
+        started.append(path)
+        if path != "a":
+            time.sleep(0.3)
+        return path
+
+    scanner = Scanner(max_workers=2)
+    results = scanner._iter_parallel_results(["a", "b", "c", "d", "e"], worker)
+    assert next(results) == ("a", "a")
+
+    results.close()
+
+    assert "d" not in started
+    assert "e" not in started

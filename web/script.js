@@ -1,11 +1,9 @@
 // State
 let exactData = [];
 let similarData = [];
-let activeCountdownId = null;
-let countdownInterval = null;
 let currentFocus = { rowIdx: -1, imgIdx: -1, tab: 'exact' };
 let scanInProgress = false;
-let pendingDeletion = null; // { type, tabName, rows, paths, timerId, committing }
+let pendingDeletion = null; // { tabName, rows, paths, timerId, committing, focus, request }
 
 let currentDirectory = '';
 
@@ -245,35 +243,51 @@ function setScanControls(isScanning) {
     if (similarAutoDedupBtn) similarAutoDedupBtn.disabled = isScanning;
 }
 
-function showScanError(message) {
-    statusText.textContent = `⚠ ${message}`;
-    progressBar.style.width = '0%';
-    statusBar.classList.remove('hidden');
+// A newer scan may have started by the time this fires; keep its progress visible.
+function hideStatusBarLater() {
     setTimeout(() => {
         if (!scanInProgress) statusBar.classList.add('hidden');
     }, 5000);
 }
 
-function stageBulkDeletion(tabName, rows, paths, toastMessage) {
-    if (paths.length === 0) return false;
+function showScanError(message) {
+    statusText.textContent = `⚠ ${message}`;
+    progressBar.style.width = '0%';
+    statusBar.classList.remove('hidden');
+    hideStatusBarLater();
+}
 
-    if (pendingDeletion) undoPendingDeletion();
+// Undo after several cleans returns focus to where the first one started.
+function mergeStagedFocus(earlier, later) {
+    if (!earlier) return later;
+    if (!later) return earlier;
+    if (earlier.previous.tab !== later.previous.tab) return later;
+    return { previous: earlier.previous, staged: later.staged };
+}
+
+// Hide the rows and give the user three seconds to undo before the delete is
+// sent. A clean made while another is still waiting joins it, so one undo
+// restores both, instead of silently bringing the earlier rows back.
+function stageDeletion(tabName, rows, paths, toastMessage) {
+    if (paths.length === 0) return;
+
+    const earlier = pendingDeletion;
+    if (earlier) clearTimeout(earlier.timerId);
 
     rows.forEach(row => {
         row.style.display = 'none';
     });
 
+    const allPaths = earlier ? Array.from(new Set([...earlier.paths, ...paths])) : paths;
     pendingDeletion = {
-        type: 'global',
         tabName,
-        rows,
-        paths,
+        rows: earlier ? Array.from(new Set([...earlier.rows, ...rows])) : rows,
+        paths: allPaths,
         timerId: setTimeout(() => commitPendingDeletion(), 3000),
         committing: false,
-        focus: moveFocusOffHiddenRows(tabName)
+        focus: mergeStagedFocus(earlier?.focus, moveFocusOffHiddenRows(tabName))
     };
-    showToast(toastMessage);
-    return true;
+    showToast(earlier ? `${allPaths.length} photos marked; moving to Recycle Bin in 3 seconds.` : toastMessage);
 }
 
 if (autoDedupBtn) {
@@ -293,7 +307,7 @@ if (autoDedupBtn) {
             }
         });
         
-        stageBulkDeletion(
+        stageDeletion(
             'exact',
             rowsToHide,
             toDeleteAll,
@@ -307,9 +321,9 @@ if (similarAutoDedupBtn) {
         if (scanInProgress || pendingDeletion?.committing) return;
         const visibleRows = Array.from(document.querySelectorAll('#tab-similar .group-row'))
             .filter(row => row.style.display !== 'none');
-        const pendingSimilarRows = pendingDeletion?.tabName === 'similar'
-            ? pendingDeletion.rows
-            : [];
+        // A waiting batch may mix tabs; count only its similar rows here.
+        const pendingSimilarRows = (pendingDeletion?.rows || [])
+            .filter(row => row.dataset.tab === 'similar');
         const rows = Array.from(new Set([...visibleRows, ...pendingSimilarRows]));
         const toDeleteAll = [];
         const rowsToHide = [];
@@ -330,7 +344,7 @@ if (similarAutoDedupBtn) {
         );
         if (!confirmed) return;
 
-        stageBulkDeletion(
+        stageDeletion(
             'similar',
             rowsToHide,
             toDeleteAll,
@@ -386,13 +400,35 @@ async function startScan(directory, mode) {
     }
 }
 
-async function pollStatus(mode) {
+// One failed status poll does not mean the scan stopped, so retry with backoff.
+// Giving up abandons the results: cancel the backend scan as well, or the next
+// scan is refused while it keeps running.
+const STATUS_POLL_RETRY_DELAYS = [500, 1000, 2000, 4000];
+
+function retryOrAbandonScan(mode, failures, error) {
+    if (failures < STATUS_POLL_RETRY_DELAYS.length) {
+        setTimeout(() => pollStatus(mode, failures + 1), STATUS_POLL_RETRY_DELAYS[failures]);
+        return;
+    }
+    Promise.resolve()
+        .then(() => fetch('/api/cancel_scan', { method: 'POST' }))
+        .catch(() => {});
+    setScanControls(false);
+    showScanError(error.message || 'Lost connection while scanning.');
+}
+
+async function pollStatus(mode, failures = 0) {
     if (!scanInProgress) return;
+    let data;
     try {
         const res = await fetch('/api/scan_status');
         if (!res.ok) throw new Error(`Status request failed (${res.status})`);
-        const data = await res.json();
-    
+        data = await res.json();
+    } catch (error) {
+        retryOrAbandonScan(mode, failures, error);
+        return;
+    }
+    try {
     statusText.textContent = data.message;
     if (data.progress && data.progress.total) {
         const pct = (data.progress.current / data.progress.total) * 100;
@@ -441,7 +477,7 @@ async function pollStatus(mode) {
             statusText.textContent = postMsg;
             progressBar.style.width = '0%';
             statusBar.classList.remove('hidden');
-            setTimeout(() => statusBar.classList.add('hidden'), 5000);
+            hideStatusBarLater();
         }
     } else {
         setTimeout(() => pollStatus(mode), 500);
@@ -575,9 +611,8 @@ function removeDeletedPaths(tabName, deletedPaths) {
         .map(item => item.dataset.path);
     const selectedPaths = new Set(previouslySelected.filter(path => !deletedPaths.has(path)));
     const lostSelections = new Set(previouslySelected.filter(path => deletedPaths.has(path)));
-    const updatedData = currentData
-        .map(group => group.filter(path => !deletedPaths.has(path)))
-        .filter(group => group.length > 1);
+    const survivingGroups = currentData.map(group => group.filter(path => !deletedPaths.has(path)));
+    const updatedData = survivingGroups.filter(group => group.length > 1);
 
     // A kept photo can be deleted from the other tab. Never leave such a group
     // with nothing selected, or the next clean would remove every remaining copy.
@@ -597,8 +632,15 @@ function removeDeletedPaths(tabName, deletedPaths) {
     renderList(updatedData, container, tabName, selectedPaths);
 
     if (currentFocus.tab === tabName) {
-        currentFocus = updatedData.length > 0
-            ? { rowIdx: 0, imgIdx: 0, tab: tabName }
+        // Stay on the focused photo's group, or the next group still listed,
+        // instead of jumping back to the top of the list.
+        const focusedPath = currentData[currentFocus.rowIdx]?.[currentFocus.imgIdx];
+        const groupsBefore = survivingGroups
+            .slice(0, Math.max(currentFocus.rowIdx, 0))
+            .filter(group => group.length > 1).length;
+        const rowIdx = Math.min(groupsBefore, updatedData.length - 1);
+        currentFocus = rowIdx >= 0
+            ? { rowIdx, imgIdx: Math.max(updatedData[rowIdx].indexOf(focusedPath), 0), tab: tabName }
             : { rowIdx: -1, imgIdx: -1, tab: tabName };
         updateFocusUI();
     }
@@ -621,6 +663,7 @@ function commitPendingDeletion() {
     if (!deletion.committing) {
         clearTimeout(deletion.timerId);
         deletion.committing = true;
+        showToast(`Moving ${deletion.paths.length} photo(s) to the Recycle Bin\u2026`, { undoable: false });
         deletion.request = sendPendingDeletion(deletion);
     }
     return deletion.request || Promise.resolve();
@@ -652,14 +695,20 @@ async function sendPendingDeletion(deletion) {
 
         const failedCount = deletion.paths.filter(path => !deletedPaths.has(path)).length;
         if (failedCount > 0) {
-            showToast(`\u26A0 ${failedCount} file(s) could not be deleted. They remain visible.`);
+            hideToastLater(showToast(
+                `\u26A0 ${failedCount} file(s) could not be deleted. They remain visible.`,
+                { undoable: false }
+            ));
         } else {
             hideToast();
         }
     } catch (error) {
         restorePendingDeletion(deletion);
         restoreFocusAfterUndo(deletion);
-        showToast('\u26A0 Delete failed. The photos remain visible and can be retried.');
+        hideToastLater(showToast(
+            '\u26A0 Delete failed. The photos remain visible and can be retried.',
+            { undoable: false }
+        ));
     } finally {
         if (pendingDeletion === deletion) {
             pendingDeletion = null;
@@ -678,16 +727,31 @@ function undoPendingDeletion() {
     hideToast();
 }
 
-function showToast(message) {
+const toastUndoBtn = document.getElementById('toast-undo-btn');
+let toastId = 0;
+
+// Undo is offered only while a staged delete is still waiting; once the
+// request is on its way, or for a result message, the button does nothing.
+function showToast(message, { undoable = true } = {}) {
+    toastId += 1;
     document.getElementById('toast-msg').textContent = message;
+    toastUndoBtn.style.display = undoable ? '' : 'none';
     document.getElementById('toast-container').classList.add('show');
+    return toastId;
+}
+
+// Hide a result message after a while, unless a newer toast replaced it.
+function hideToastLater(id) {
+    setTimeout(() => {
+        if (toastId === id) hideToast();
+    }, 5000);
 }
 
 function hideToast() {
     document.getElementById('toast-container').classList.remove('show');
 }
 
-document.getElementById('toast-undo-btn').addEventListener('click', undoPendingDeletion);
+toastUndoBtn.addEventListener('click', undoPendingDeletion);
 
 function triggerClean(tabName, rIdx) {
     if (scanInProgress || pendingDeletion?.committing) return;
@@ -699,24 +763,7 @@ function triggerClean(tabName, rIdx) {
     const items = Array.from(row.querySelectorAll('.image-item'));
     const toDelete = items.filter(item => !item.classList.contains('selected')).map(item => item.dataset.path);
     
-    if (toDelete.length === 0) return;
-
-    // Undo previous pending deletion to preserve its undo window
-    if (pendingDeletion) undoPendingDeletion();
-
-    // Hide row immediately
-    row.style.display = 'none';
-
-    pendingDeletion = {
-        type: 'single',
-        tabName,
-        rows: [row],
-        paths: toDelete,
-        timerId: setTimeout(() => commitPendingDeletion(), 3000),
-        committing: false,
-        focus: moveFocusOffHiddenRows(tabName)
-    };
-    showToast(`${toDelete.length} photos marked; moving to Recycle Bin in 3 seconds.`);
+    stageDeletion(tabName, [row], toDelete, `${toDelete.length} photos marked; moving to Recycle Bin in 3 seconds.`);
 }
 
 // Keyboard Control

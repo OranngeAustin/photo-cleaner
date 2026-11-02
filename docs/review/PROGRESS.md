@@ -17,6 +17,53 @@
 | 6 | 算法优化（前 3 项，各自 `claude/perf-*` 分支 + PR → review-fixes） | ✅ 完成 | 6.1 聚类 [PR #5](https://github.com/OranngeAustin/photo-cleaner/pull/5) −69%；6.2 结果路径白名单 [PR #6](https://github.com/OranngeAustin/photo-cleaner/pull/6) −58%；6.3 并行调度 [PR #7](https://github.com/OranngeAustin/photo-cleaner/pull/7) −9%（3 种方案均未达 20%，按规则保留最好的正确版本） |
 | 7 | 总结 → `00-SUMMARY.md` | ✅ 完成 | 见 [00-SUMMARY.md](00-SUMMARY.md) |
 
+## 第三轮：修复低风险 L1–L13（分支 `claude/low-fixes`）
+
+从 `claude/medium-fixes` @ `b916739` 创建，PR 目标为 `claude/medium-fixes`。本轮只遵守 RUNBOOK 的「工作规则」：
+每个问题一个 commit，提交信息引用编号；能写测试的先写测试，并确认修复前失败；每次修复后运行全部测试；
+误报、纯风格偏好或修复风险过大的问题不改，标「⏭ 跳过」并写明原因。
+
+基线（`b916739`）：Python 86 passed、1 skipped（Windows 联接点测试）；Node 32 passed。
+
+| 编号 | 状态 | commit | 说明 |
+|---|---|---|---|
+| L1 | ✅ 已修复 | `d206e6f` | M8 已把扫描结束时的 realpath/stat 移到锁外；本项补上删除路径中锁内的 `_path_key`，并加测试：整个扫描 + 删除过程中，`realpath` 都不在持锁时调用 |
+| L2 | ✅ 已修复 | `6bc63b2` | 缓存函数不再吞掉异常（`lru_cache` 不缓存异常），由外层 `generate_thumbnail` 捕获并返回空结果；下次请求会重新生成 |
+| L3 | ✅ 已修复 | `d00772c` | `_finish` 捕获并记录回调异常，`done` 只发一次；`main.py` 的扫描线程入口用 `finally` 兜底：任务仍未复位就释放 `active_scanner` 并报告扫描失败 |
+| L4 | ✅ 已修复 | `8e781bd` | `_iter_parallel_results` 用 `try/finally` 取消所有排队中的任务，取消、消费方异常、提前关闭生成器三种情况都覆盖 |
+| L5 | ✅ 已修复（文档） | `271a3ab` | 按建议的第一种做法在 CLAUDE.md 和代码注释中写明：联接点会被遍历，指向扫描根之外的结果能看到但无法预览和删除。是否跳过这类联接点仍等待 Q3 决定，扫描行为未改 |
+| L6 | ✅ 已修复 | `45c135a` | 扫描结束提示与 `showScanError` 共用 `hideStatusBarLater()`，到点时如果新的扫描正在进行就不隐藏进度栏 |
+| L7 | ✅ 部分修复 | `9f2f0b2` | 状态轮询失败后按 0.5/1/2/4 秒退避重试，连续 5 次失败才放弃；放弃时顺带 `POST /api/cancel_scan`，避免后端继续扫描、下一次扫描返回 409。**未加取消按钮**：属于新增界面功能，留给人工决定（R3-D2） |
+| L8 | ✅ 已修复 | `b963353` | 提交删除后焦点留在原来那张照片所在的组（组被删掉时落到下一个仍在列表中的组），不再跳回第 0 组；后端删除后不再清空缩略图缓存（键已包含 size 和 mtime）。整表重新渲染保留，改成增量更新风险更大 |
+| L9 | ✅ 已修复 | `d36d670` | 采用「像相似页那样合并」：撤销窗口内的新清理动作并入待删除批次（路径和行去重，计时器重新计 3 秒），一次撤销全部恢复，焦点回到第一次清理前的位置；相似页批量清理统计待删除行时改为按行所属标签过滤 |
+| L10 | ✅ 已修复 | `12bc399` | 开始提交时提示改为「正在移到回收站」并隐藏 Undo 按钮；部分失败和失败提示不带 Undo，5 秒后自动隐藏（被更新的提示替换时不隐藏） |
+| L11 | ✅ 已修复（部分不成立） | `be9ea32` | 删除未使用的 `activeCountdownId`、`countdownInterval`，删除从不读取的 `pendingDeletion.type`，删除无效规则 `.group-row.focused`；`triggerClean` 和批量清理改为共用 `stageDeletion`。**两处已不成立、未改**：`scrollContainer` 现在被 H4 的修复使用；`.lightbox img.zoomed` 有效（`setZoom` 会给图片加 `zoomed`） |
+| L12 | ⏭ 跳过 | `dc1a847` | 修复风险过大、收益很小：建议的 lstat 复核只能缩小窗口，不能关闭 TOCTOU（send2trash 只接受路径字符串）；彻底修复需要 Windows 专用的基于句柄的删除，见 R3-D3 |
+| L13 | ✅ 已修复 | `bb91302` | 新增 `requirements.lock`（当前测试环境的完整依赖闭包，精确版本），作为 constraints 文件可选使用：`pip install -r requirements.txt -c requirements.lock`；`requirements.txt` 不变。新增测试保证锁文件覆盖每个直接依赖以及影响 pHash 的 NumPy/SciPy/PyWavelets |
+
+### 第三轮决策记录
+
+- **R3-D1 记录位置**：第三轮的进度写在阶段清单之后，而不是文件末尾。第二轮的记录只在 `claude/review-fixes` 上，
+  追加在文件末尾；本分支基于 `claude/medium-fixes`，如果也追加到末尾，两条分支合并时会在同一位置冲突。
+- **R3-D2 L7 不加取消按钮**：02-findings 建议「有限次重试并退避；提供取消按钮」。重试和放弃时自动取消后端扫描
+  已经解决了「结果被丢弃、再次扫描返回 409」；取消按钮要改 HTML、样式和交互，属于新功能，不在低风险修复范围内。
+- **R3-D3 L12 跳过**：建议的「删除前用 `lstat` 复核」只能缩小检查与使用之间的窗口，不能消除它：`send2trash`
+  只接受路径字符串，Windows 上由 Shell 按路径重新解析。现在每个文件的检查（realpath、白名单、M8 的指纹 stat）
+  与 `send2trash` 之间只隔几微秒，再加一次复核几乎没有收益。真正关闭这个 TOCTOU 需要改成基于句柄的删除
+  （打开句柄、用 `GetFinalPathNameByHandle` 核对、再交给 `IFileOperation` 回收），是 Windows 专用的大改动，
+  风险远大于收益。利用前提是攻击者对扫描目录有写权限且能精确卡住时机，后果是文件进回收站（可还原）。
+- **R3-D4 L11 中已不成立的两项**：`scrollContainer` 在 H4 修复后已被使用；`.lightbox img.zoomed` 是有效规则
+  （`setZoom` 会给预览图加 `zoomed`）。这两项按误报处理，未改。
+- **R3-D5 先 L11 后 L9**：L9 的合并逻辑放在 L11 抽出的公共函数 `stageDeletion` 里，所以先提交 L11 的纯清理
+  （不改行为），再提交 L9 的行为修改，两个 commit 各自只对应一个编号。
+
+### 第三轮结束状态
+
+- 11 项修复（其中 L7 部分修复、L11 有两项不成立），L5 只改文档，L12 跳过。
+- 测试：Python 由 86 passed / 1 skipped 变为 **93 passed / 1 skipped**；Node 由 32 变为 **40 passed**。
+  除 L5、L11、L12 外，每项都先写测试并确认修复前失败；没有修改或删除任何已有测试的断言。
+- 分支 `claude/low-fixes` 已推送，PR 目标为 `claude/medium-fixes`。未推送 `main`，未 force push，未合并任何 PR，未删除分支。
+
 ## 阶段 0：基线
 
 环境：Linux x86_64（云端容器，4 核），Python 3.13.18，Node v22.23.4。

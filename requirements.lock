@@ -1,0 +1,34 @@
+# Exact versions the test suite passed with (Python 3.13, Linux, 2026-11).
+# Optional, for reproducible installs; requirements.txt stays unpinned:
+#
+#     pip install -r requirements.txt -c requirements.lock
+#
+# A constraints file only pins packages that actually get installed, so
+# platform-only dependencies missing here (pywebview's pythonnet on Windows)
+# are still resolved freely, and Linux-only entries are ignored elsewhere.
+# The tests' expected pHash values depend on ImageHash, NumPy, SciPy and
+# PyWavelets. Regenerate this file after deliberately upgrading anything.
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+bottle==0.13.4
+click==8.5.0
+fastapi==0.162.0
+h11==0.16.0
+idna==3.20
+ImageHash==4.3.2
+numpy==2.5.3
+opentelemetry-api==1.45.0
+pillow==12.3.0
+pillow_heif==1.8.1
+proxy_tools==0.1.0
+pydantic==2.13.5
+pydantic_core==2.46.5
+PyWavelets==1.10.0
+pywebview==6.2.1
+scipy==1.18.1
+Send2Trash==2.1.0
+starlette==1.7.0
+typing_extensions==4.16.0
+typing-inspection==0.4.4
+uvicorn==0.54.0
