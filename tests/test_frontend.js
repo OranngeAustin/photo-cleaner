@@ -1002,3 +1002,30 @@ test('new clean actions are ignored while a delete is being committed', async ()
     await commit;
     assert.equal(runtime.api.getPendingDeletion(), null);
 });
+
+test('the post-scan message timer does not hide the progress of a newer scan', async () => {
+    let statusCalls = 0;
+    const runtime = createRuntime(async url => {
+        if (url === '/api/scan') return { ok: true, json: async () => ({ status: 'started' }) };
+        statusCalls += 1;
+        const done = statusCalls === 1;
+        return {
+            ok: true,
+            json: async () => ({ done, message: 'Scanning...', progress: {}, cancelled: false, results: { exact: [], similar: [] } }),
+        };
+    });
+    runtime.window.pywebview = { api: { choose_directory: async () => '/photos' } };
+    runtime.elements.browseBtn.dispatch('click');
+    await flushPromises();
+    // "No duplicate photos found." stays up for five seconds.
+    const hideTimer = runtime.scheduledCallbacks.find(entry => entry.delay === 5000);
+    assert.ok(hideTimer);
+
+    // Within those five seconds, opening the empty similar tab starts its scan.
+    runtime.document.querySelectorAll('.tab-btn')[1].dispatch('click');
+    await flushPromises();
+    assert.equal(runtime.elements.statusBar.classList.contains('hidden'), false);
+
+    hideTimer.callback();
+    assert.equal(runtime.elements.statusBar.classList.contains('hidden'), false);
+});

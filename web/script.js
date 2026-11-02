@@ -245,13 +245,18 @@ function setScanControls(isScanning) {
     if (similarAutoDedupBtn) similarAutoDedupBtn.disabled = isScanning;
 }
 
+// A newer scan may have started by the time this fires; keep its progress visible.
+function hideStatusBarLater() {
+    setTimeout(() => {
+        if (!scanInProgress) statusBar.classList.add('hidden');
+    }, 5000);
+}
+
 function showScanError(message) {
     statusText.textContent = `⚠ ${message}`;
     progressBar.style.width = '0%';
     statusBar.classList.remove('hidden');
-    setTimeout(() => {
-        if (!scanInProgress) statusBar.classList.add('hidden');
-    }, 5000);
+    hideStatusBarLater();
 }
 
 function stageBulkDeletion(tabName, rows, paths, toastMessage) {
@@ -441,7 +446,7 @@ async function pollStatus(mode) {
             statusText.textContent = postMsg;
             progressBar.style.width = '0%';
             statusBar.classList.remove('hidden');
-            setTimeout(() => statusBar.classList.add('hidden'), 5000);
+            hideStatusBarLater();
         }
     } else {
         setTimeout(() => pollStatus(mode), 500);
