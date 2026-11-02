@@ -305,12 +305,14 @@ globalThis.__frontendTest = {
     undoPendingDeletion,
     getLightboxState: () => ({ isZoomed, panX: lightboxPanX, panY: lightboxPanY }),
     getPendingDeletion: () => pendingDeletion,
+    getFocus: () => JSON.parse(JSON.stringify(currentFocus)),
+    setFocus,
     setPendingDeletion: value => { pendingDeletion = value; },
     setExactData: value => { exactData = value; },
     setSimilarData: value => { similarData = value; },
     snapshot: () => JSON.parse(JSON.stringify({ exactData, similarData })),
 };`, context, { filename: 'script.js' });
-    return { api: context.globalThis.__frontendTest, document, elements, scheduledDelays };
+    return { api: context.globalThis.__frontendTest, document, elements, scheduledDelays, window };
 }
 
 function preparePendingExactDeletion(runtime, paths) {
@@ -824,4 +826,21 @@ test('when focus is scrolled away, Delete ignores groups hidden under the header
     const pending = runtime.api.getPendingDeletion();
     assert.equal(pending.rows[0].id, rows[1].id);
     assert.deepEqual(pending.paths, ['b2.jpg']);
+});
+
+test('switching to a tab with fewer groups moves keyboard focus into that tab', () => {
+    const runtime = createRuntime(async () => ({ ok: true, json: async () => ({}) }));
+    const exactGroups = Array.from({ length: 9 }, (_, i) => [`e${i}a.jpg`, `e${i}b.jpg`]);
+    const similarGroups = [['s0a.jpg', 's0b.jpg'], ['s1a.jpg', 's1b.jpg'], ['s2a.jpg', 's2b.jpg']];
+    runtime.api.setExactData(exactGroups);
+    runtime.api.renderList(exactGroups, runtime.elements.exactList, 'exact');
+    runtime.api.setSimilarData(similarGroups);
+    runtime.api.renderList(similarGroups, runtime.elements.similarList, 'similar');
+    runtime.api.setFocus('exact', 8, 0);
+
+    runtime.document.querySelectorAll('.tab-btn')[1].dispatch('click');
+    assert.deepEqual(runtime.api.getFocus(), { rowIdx: 0, imgIdx: 0, tab: 'similar' });
+
+    runtime.document.dispatch('keydown', { key: 'd' });
+    assert.deepEqual(runtime.api.getFocus(), { rowIdx: 0, imgIdx: 1, tab: 'similar' });
 });

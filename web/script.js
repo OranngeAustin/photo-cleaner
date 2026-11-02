@@ -34,8 +34,7 @@ tabs.forEach(tab => {
         tabContents.forEach(c => c.classList.remove('active'));
         tab.classList.add('active');
         document.getElementById(`tab-${tab.dataset.tab}`).classList.add('active');
-        currentFocus.tab = tab.dataset.tab;
-        updateFocusUI();
+        focusFirstVisibleRow(tab.dataset.tab);
         
         // Auto-scan if folder is chosen and this tab has no data yet
         if (currentDirectory) {
@@ -705,6 +704,21 @@ function updateFocusUI() {
     }
 }
 
+function visibleRows(tabName) {
+    return Array.from(document.querySelectorAll(`#tab-${tabName} .group-row`))
+        .filter(row => row.style.display !== 'none');
+}
+
+// Row indexes belong to one tab, so a focus carried over from the other tab
+// (or from before a re-render) can point past this tab's groups.
+function focusFirstVisibleRow(tabName) {
+    const [row] = visibleRows(tabName);
+    currentFocus = row
+        ? { rowIdx: Number(row.dataset.rowIdx), imgIdx: 0, tab: tabName }
+        : { rowIdx: -1, imgIdx: -1, tab: tabName };
+    updateFocusUI();
+}
+
 // Rows scroll inside #scroll-container, below the fixed header, so visibility
 // must be judged against the container rather than the window.
 function isRowInScrollView(row) {
@@ -760,6 +774,10 @@ document.addEventListener('keydown', (e) => {
     const tabName = currentFocus.tab;
     const data = tabName === 'exact' ? exactData : similarData;
     if (data.length === 0 || currentFocus.rowIdx < 0) return;
+    if (!data[currentFocus.rowIdx]) {
+        focusFirstVisibleRow(tabName);
+        return;
+    }
 
     let { rowIdx, imgIdx } = currentFocus;
     const k = e.key.toLowerCase();
