@@ -824,6 +824,21 @@ def test_a_scan_counts_files_it_could_not_read(tmp_path, monkeypatch, mode):
     assert done["unreadable_files"] == 1
 
 
+def test_scans_include_tif_jfif_and_heif_files(tmp_path):
+    """W20: .tif and .jfif are common names for TIFF and JPEG on Windows, and
+    .heif is the generic extension of HEIC."""
+    for extension, image_format in ((".tif", "TIFF"), (".jfif", "JPEG")):
+        Image.new("RGB", (40, 30), "green").save(tmp_path / f"a{extension}", format=image_format)
+        (tmp_path / f"b{extension}").write_bytes((tmp_path / f"a{extension}").read_bytes())
+
+    results = []
+    Scanner(max_workers=1).scan_directory(str(tmp_path), "exact", lambda event, data: results.append((event, data)))
+
+    groups = [[Path(path).name for path in group] for group in results[-1][1]["exact"]]
+    assert sorted(groups) == [["a.jfif", "b.jfif"], ["a.tif", "b.tif"]]
+    assert (".heif" in scanner_module.SUPPORTED_EXTENSIONS) is scanner_module.HEIC_AVAILABLE
+
+
 def test_a_scan_skips_and_counts_names_that_are_not_valid_unicode(tmp_path):
     """W02: NTFS allows an unpaired UTF-16 surrogate in a file name (and on
     Linux, name bytes that are not UTF-8 decode to one).  Such a path cannot

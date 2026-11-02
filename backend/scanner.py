@@ -26,9 +26,11 @@ else:
     register_heif_opener()
     HEIC_AVAILABLE = True
 
-SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tiff'}
+# .tif and .jfif are common Windows names for TIFF and JPEG; .heif is the
+# generic extension of HEIC.
+SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.jfif', '.png', '.bmp', '.webp', '.tif', '.tiff'}
 if HEIC_AVAILABLE:
-    SUPPORTED_EXTENSIONS.add('.heic')
+    SUPPORTED_EXTENSIONS.update({'.heic', '.heif'})
 HASH_CHUNK_SIZE = 256 * 1024
 PREFIX_HASH_SIZE = 64 * 1024
 SIMILARITY_THRESHOLD = 5
