@@ -1,11 +1,9 @@
 // State
 let exactData = [];
 let similarData = [];
-let activeCountdownId = null;
-let countdownInterval = null;
 let currentFocus = { rowIdx: -1, imgIdx: -1, tab: 'exact' };
 let scanInProgress = false;
-let pendingDeletion = null; // { type, tabName, rows, paths, timerId, committing }
+let pendingDeletion = null; // { tabName, rows, paths, timerId, committing, focus, request }
 
 let currentDirectory = '';
 
@@ -259,8 +257,9 @@ function showScanError(message) {
     hideStatusBarLater();
 }
 
-function stageBulkDeletion(tabName, rows, paths, toastMessage) {
-    if (paths.length === 0) return false;
+// Hide the rows and give the user three seconds to undo before the delete is sent.
+function stageDeletion(tabName, rows, paths, toastMessage) {
+    if (paths.length === 0) return;
 
     if (pendingDeletion) undoPendingDeletion();
 
@@ -269,7 +268,6 @@ function stageBulkDeletion(tabName, rows, paths, toastMessage) {
     });
 
     pendingDeletion = {
-        type: 'global',
         tabName,
         rows,
         paths,
@@ -278,7 +276,6 @@ function stageBulkDeletion(tabName, rows, paths, toastMessage) {
         focus: moveFocusOffHiddenRows(tabName)
     };
     showToast(toastMessage);
-    return true;
 }
 
 if (autoDedupBtn) {
@@ -298,7 +295,7 @@ if (autoDedupBtn) {
             }
         });
         
-        stageBulkDeletion(
+        stageDeletion(
             'exact',
             rowsToHide,
             toDeleteAll,
@@ -335,7 +332,7 @@ if (similarAutoDedupBtn) {
         );
         if (!confirmed) return;
 
-        stageBulkDeletion(
+        stageDeletion(
             'similar',
             rowsToHide,
             toDeleteAll,
@@ -732,24 +729,7 @@ function triggerClean(tabName, rIdx) {
     const items = Array.from(row.querySelectorAll('.image-item'));
     const toDelete = items.filter(item => !item.classList.contains('selected')).map(item => item.dataset.path);
     
-    if (toDelete.length === 0) return;
-
-    // Undo previous pending deletion to preserve its undo window
-    if (pendingDeletion) undoPendingDeletion();
-
-    // Hide row immediately
-    row.style.display = 'none';
-
-    pendingDeletion = {
-        type: 'single',
-        tabName,
-        rows: [row],
-        paths: toDelete,
-        timerId: setTimeout(() => commitPendingDeletion(), 3000),
-        committing: false,
-        focus: moveFocusOffHiddenRows(tabName)
-    };
-    showToast(`${toDelete.length} photos marked; moving to Recycle Bin in 3 seconds.`);
+    stageDeletion(tabName, [row], toDelete, `${toDelete.length} photos marked; moving to Recycle Bin in 3 seconds.`);
 }
 
 // Keyboard Control

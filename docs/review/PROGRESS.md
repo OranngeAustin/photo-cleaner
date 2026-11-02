@@ -35,7 +35,7 @@
 | L8 | ✅ 已修复 |  | 提交删除后焦点留在原来那张照片所在的组（组被删掉时落到下一个仍在列表中的组），不再跳回第 0 组；后端删除后不再清空缩略图缓存（键已包含 size 和 mtime）。整表重新渲染保留，改成增量更新风险更大 |
 | L9 | ⬜ 待处理 | | |
 | L10 | ⬜ 待处理 | | |
-| L11 | ⬜ 待处理 | | |
+| L11 | ✅ 已修复（部分不成立） |  | 删除未使用的 `activeCountdownId`、`countdownInterval`，删除从不读取的 `pendingDeletion.type`，删除无效规则 `.group-row.focused`；`triggerClean` 和批量清理改为共用 `stageDeletion`。**两处已不成立、未改**：`scrollContainer` 现在被 H4 的修复使用；`.lightbox img.zoomed` 有效（`setZoom` 会给图片加 `zoomed`） |
 | L12 | ⬜ 待处理 | | |
 | L13 | ⬜ 待处理 | | |
 
