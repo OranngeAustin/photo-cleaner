@@ -1104,3 +1104,35 @@ test('committing a delete keeps keyboard focus on the group the user was on', as
     assert.deepEqual(runtime.api.snapshot().exactData, [['a1.jpg', 'a2.jpg'], ['b1.jpg', 'b2.jpg'], ['d1.jpg', 'd2.jpg']]);
     assert.deepEqual(runtime.api.getFocus(), { rowIdx: 2, imgIdx: 1, tab: 'exact' });
 });
+
+test('a second clean within the undo window joins the first instead of undoing it', () => {
+    const runtime = createRuntime(async () => ({ ok: true, json: async () => ({}) }));
+    const rows = renderExactRowsForDelete(runtime);
+    runtime.api.setFocus('exact', 0, 0);
+
+    runtime.document.dispatch('keydown', { key: 'Delete' });
+    runtime.document.dispatch('keydown', { key: 'Delete' });
+
+    assert.equal(rows[0].style.display, 'none');
+    assert.equal(rows[1].style.display, 'none');
+    assert.deepEqual([...runtime.api.getPendingDeletion().paths], ['a2.jpg', 'b2.jpg']);
+    assert.match(runtime.elements.toastMessage.textContent, /^2 photos marked/);
+
+    // One undo brings both groups back, with focus where the user started.
+    runtime.document.dispatch('keydown', { key: 'z', ctrlKey: true });
+    assert.equal(rows[0].style.display, 'flex');
+    assert.equal(rows[1].style.display, 'flex');
+    assert.deepEqual(runtime.api.getFocus(), { rowIdx: 0, imgIdx: 0, tab: 'exact' });
+});
+
+test('exact auto dedup keeps a group already waiting in the undo window', async () => {
+    const requests = [];
+    const runtime = createRuntime(recordingDeleteFetch(requests));
+    renderExactRowsForDelete(runtime);
+    runtime.elements.exactList.querySelectorAll('.clean-btn')[0].dispatch('click');
+
+    runtime.elements.autoDedupBtn.dispatch('click');
+    await runtime.api.commitPendingDeletion();
+
+    assert.deepEqual(requests, [['a2.jpg', 'b2.jpg', 'c2.jpg', 'c3.jpg']]);
+});

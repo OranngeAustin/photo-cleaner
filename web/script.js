@@ -257,25 +257,37 @@ function showScanError(message) {
     hideStatusBarLater();
 }
 
-// Hide the rows and give the user three seconds to undo before the delete is sent.
+// Undo after several cleans returns focus to where the first one started.
+function mergeStagedFocus(earlier, later) {
+    if (!earlier) return later;
+    if (!later) return earlier;
+    if (earlier.previous.tab !== later.previous.tab) return later;
+    return { previous: earlier.previous, staged: later.staged };
+}
+
+// Hide the rows and give the user three seconds to undo before the delete is
+// sent. A clean made while another is still waiting joins it, so one undo
+// restores both, instead of silently bringing the earlier rows back.
 function stageDeletion(tabName, rows, paths, toastMessage) {
     if (paths.length === 0) return;
 
-    if (pendingDeletion) undoPendingDeletion();
+    const earlier = pendingDeletion;
+    if (earlier) clearTimeout(earlier.timerId);
 
     rows.forEach(row => {
         row.style.display = 'none';
     });
 
+    const allPaths = earlier ? Array.from(new Set([...earlier.paths, ...paths])) : paths;
     pendingDeletion = {
         tabName,
-        rows,
-        paths,
+        rows: earlier ? Array.from(new Set([...earlier.rows, ...rows])) : rows,
+        paths: allPaths,
         timerId: setTimeout(() => commitPendingDeletion(), 3000),
         committing: false,
-        focus: moveFocusOffHiddenRows(tabName)
+        focus: mergeStagedFocus(earlier?.focus, moveFocusOffHiddenRows(tabName))
     };
-    showToast(toastMessage);
+    showToast(earlier ? `${allPaths.length} photos marked; moving to Recycle Bin in 3 seconds.` : toastMessage);
 }
 
 if (autoDedupBtn) {
@@ -309,9 +321,9 @@ if (similarAutoDedupBtn) {
         if (scanInProgress || pendingDeletion?.committing) return;
         const visibleRows = Array.from(document.querySelectorAll('#tab-similar .group-row'))
             .filter(row => row.style.display !== 'none');
-        const pendingSimilarRows = pendingDeletion?.tabName === 'similar'
-            ? pendingDeletion.rows
-            : [];
+        // A waiting batch may mix tabs; count only its similar rows here.
+        const pendingSimilarRows = (pendingDeletion?.rows || [])
+            .filter(row => row.dataset.tab === 'similar');
         const rows = Array.from(new Set([...visibleRows, ...pendingSimilarRows]));
         const toDeleteAll = [];
         const rowsToHide = [];
