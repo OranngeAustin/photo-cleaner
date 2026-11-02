@@ -35,4 +35,4 @@ There is no linter or build step configured. `tests/test_main.py` imports `main`
 
 **Frontend tests** (`tests/test_frontend.js`) run `web/script.js` inside a `vm` context with a hand-written fake DOM (`Element`, `ClassList`, a minimal selector matcher) and mocked `fetch`, `setTimeout` and `window.confirm`. A shim appended to the source exposes internals as `globalThis.__frontendTest`. When you add a function or state that a test needs, add it to that export list. When `script.js` starts using a new DOM API, element ID or global at load time, extend the fake DOM and the context globals too, or every frontend test breaks.
 
-README states a regression baseline (19 Python and 19 Node tests); update it when you add tests.
+README states a regression baseline (57 Python and 23 Node tests); update it when you add tests.

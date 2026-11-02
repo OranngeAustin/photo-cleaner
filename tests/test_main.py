@@ -1,6 +1,10 @@
+import os
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -163,3 +167,96 @@ def test_result_from_other_cached_mode_remains_previewable_after_empty_rescan(tm
         assert info_response["name"] == "similar-result.jpg"
     finally:
         _restore_scan_state(saved_state)
+
+
+def test_delete_refuses_a_symlink_that_resolves_to_a_result_file(tmp_path, monkeypatch):
+    saved_state = _save_scan_state()
+    try:
+        target = tmp_path / "a.jpg"
+        target.write_bytes(b"photo")
+        link = tmp_path / "b.jpg"
+        try:
+            os.symlink(target, link)
+        except (OSError, NotImplementedError):
+            pytest.skip("Creating symlinks requires extra privileges on this platform")
+        main.allowed_scan_root = str(tmp_path)
+        main.allowed_result_paths_by_mode = {
+            "exact": {main._path_key(str(target))},
+            "similar": set(),
+        }
+
+        sent_to_trash = []
+        monkeypatch.setattr(main, "send2trash", lambda path: sent_to_trash.append(path))
+        response = main.delete_files(main.DeleteRequest(files=[str(link)]))
+
+        assert response == {"deleted": [], "errors": [str(link)]}
+        assert sent_to_trash == []
+        assert main.is_result_path_allowed(str(target)) is True
+    finally:
+        _restore_scan_state(saved_state)
+
+
+def test_server_config_starts_without_console_streams():
+    """pyinstaller -w / pythonw run with sys.stdout and sys.stderr set to None."""
+    script = textwrap.dedent(
+        """
+        import sys
+        sys.stdout = None
+        sys.stderr = None
+        import uvicorn
+        import main
+        main._ensure_std_streams()
+        uvicorn.Config(main.app, host="127.0.0.1", port=0, log_level="error")
+        sys.stdout.write("ok")
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def _original_result_path_keys(results, mode):
+    """The pre-optimisation definition, kept as the characterisation oracle."""
+    return {main._path_key(path) for group in results.get(mode, []) for path in group}
+
+
+def _try_symlink(link, target):
+    try:
+        os.symlink(target, link, target_is_directory=os.path.isdir(target))
+    except (OSError, NotImplementedError):
+        return False
+    return True
+
+
+def test_result_path_keys_match_per_file_realpath(tmp_path, monkeypatch):
+    real_dir = tmp_path / "Real Photos" / "2024"
+    real_dir.mkdir(parents=True)
+    paths = []
+    for index in range(6):
+        photo = real_dir / f"IMG_{index}.JPG"
+        photo.write_bytes(b"x")
+        paths.append(str(photo))
+    groups = [paths[:3], paths[3:]]
+
+    linked_dir = tmp_path / "linked-dir"
+    if _try_symlink(linked_dir, real_dir):
+        groups.append([str(linked_dir / "IMG_0.JPG"), str(linked_dir / "IMG_1.JPG")])
+    target_file = tmp_path / "target.jpg"
+    target_file.write_bytes(b"t")
+    if _try_symlink(tmp_path / "link.jpg", target_file):
+        groups.append([str(tmp_path / "link.jpg"), str(target_file)])
+
+    # Paths that disappeared after the scan, and relative paths.
+    groups.append([str(real_dir / "gone.jpg"), str(tmp_path / "gone-dir" / "x.jpg")])
+    monkeypatch.chdir(tmp_path)
+    groups.append([os.path.join("Real Photos", "2024", "IMG_2.JPG"), os.path.join(".", "target.jpg")])
+
+    results = {"exact": groups, "similar": [[paths[0], paths[5]]]}
+
+    for mode in ("exact", "similar", "missing-mode"):
+        assert main._collect_result_path_keys(results, mode) == _original_result_path_keys(results, mode)

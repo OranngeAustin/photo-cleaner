@@ -127,11 +127,29 @@ def _read_capture_time(path: str) -> str | None:
 
 
 def _collect_result_path_keys(results: dict, mode: str) -> set[str]:
-    return {
-        _path_key(path)
-        for group in results.get(mode, [])
-        for path in group
-    }
+    """Return ``_path_key`` for every result path, resolving each directory once.
+
+    For a path whose last component is not a symlink,
+    ``realpath(dir/name) == realpath(dir)/name``.  Results share a small set of
+    directories, so caching the directory resolution replaces one realpath per
+    file (several lstat calls, or a handle open on Windows) with one per folder.
+    """
+    # Maps a directory to its resolved path, ending in a separator.
+    resolved_prefixes: dict[str, str] = {}
+    keys: set[str] = set()
+    for group in results.get(mode, []):
+        for path in group:
+            absolute_path = os.path.abspath(path)
+            directory, name = os.path.split(absolute_path)
+            if not name or os.path.islink(absolute_path):
+                keys.add(_path_key(path))
+                continue
+            prefix = resolved_prefixes.get(directory)
+            if prefix is None:
+                prefix = os.path.join(os.path.realpath(directory), "")
+                resolved_prefixes[directory] = prefix
+            keys.add(os.path.normcase(prefix + name))
+    return keys
 
 
 @app.post("/api/scan")
@@ -208,6 +226,11 @@ def delete_files(req: DeleteRequest):
     errors: list[str] = []
     for requested_path in req.files:
         try:
+            # Trashing a symlink would resolve to, and remove, a different file
+            # than the one the user selected.
+            if os.path.islink(os.path.abspath(requested_path)):
+                errors.append(requested_path)
+                continue
             real_path = _resolve_path(requested_path)
             if not is_result_path_allowed(real_path) or not os.path.isfile(real_path):
                 errors.append(requested_path)
@@ -271,6 +294,18 @@ def get_photo_info(path: str):
 app.mount("/", StaticFiles(directory=str(_resource_dir() / "web"), html=True), name="web")
 
 
+def _ensure_std_streams() -> None:
+    """Give console-less builds (pythonw, ``pyinstaller -w``) writable std streams.
+
+    Without a console, ``sys.stdout`` and ``sys.stderr`` are ``None``, and
+    uvicorn's default logging config calls ``sys.stdout.isatty()`` while it
+    builds its formatter, which aborts start-up before the window can open.
+    """
+    for stream_name in ("stdout", "stderr"):
+        if getattr(sys, stream_name) is None:
+            setattr(sys, stream_name, open(os.devnull, "w", encoding="utf-8"))
+
+
 def _server_url_when_ready(server: uvicorn.Server, timeout_seconds: float = 8.0) -> str | None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -285,6 +320,7 @@ def _server_url_when_ready(server: uvicorn.Server, timeout_seconds: float = 8.0)
 
 
 if __name__ == '__main__':
+    _ensure_std_streams()
     # Port zero asks the operating system for an unused loopback port.
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error"))
     server_thread = threading.Thread(target=server.run, daemon=True)

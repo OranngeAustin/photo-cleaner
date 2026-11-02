@@ -2,9 +2,11 @@ import hashlib
 import io
 import logging
 import os
+import queue
 import threading
+from bisect import bisect_right
 from collections import defaultdict
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor
 from functools import lru_cache
 from typing import Callable, Dict, Iterator
 
@@ -172,51 +174,62 @@ def cluster_similar_hashes(
     hash_keys = list(phash_dict)
     total_keys = len(hash_keys)
     hash_values = [int(hash_key, 16) for hash_key in hash_keys]
-
-    candidate_index: dict[tuple[int, int], list[int]] = defaultdict(list)
-    for index, hash_value in enumerate(hash_values):
-        for segment_index, (shift, width) in enumerate(PHASH_SEGMENTS):
-            candidate_index[(segment_index, _segment_value(hash_value, shift, width))].append(index)
-
-    visited_hashes: set[str] = set()
-    similar_results: list[list[str]] = []
+    # The six segments are lossless only for thresholds below six.
     use_index = threshold < len(PHASH_SEGMENTS)
+
+    # One bucket map per segment.  Indexes are appended in ascending order, so
+    # every bucket list is sorted and the candidates after an anchor start at
+    # bisect_right(bucket, anchor); earlier hashes are never compared again.
+    segment_buckets: list[dict[int, list[int]]] = [defaultdict(list) for _ in PHASH_SEGMENTS]
+    if use_index:
+        for index, hash_value in enumerate(hash_values):
+            for buckets, (shift, width) in zip(segment_buckets, PHASH_SEGMENTS):
+                buckets[_segment_value(hash_value, shift, width)].append(index)
+
+    visited = [False] * total_keys
+    similar_results: list[list[str]] = []
 
     for index, hash_key in enumerate(hash_keys):
         if _was_cancelled(cancel_event):
             break
         if progress_callback and index % 100 == 0:
             progress_callback(index, total_keys)
-        if hash_key in visited_hashes:
+        if visited[index]:
             continue
 
         group = list(phash_dict[hash_key])
-        visited_hashes.add(hash_key)
+        visited[index] = True
         hash_value = hash_values[index]
 
-        if use_index:
-            candidate_indexes: set[int] = set()
-            for segment_index, (shift, width) in enumerate(PHASH_SEGMENTS):
-                candidate_indexes.update(
-                    candidate_index[(segment_index, _segment_value(hash_value, shift, width))]
-                )
-            indexes_to_check = sorted(candidate_indexes)
+        if _was_cancelled(cancel_event):
+            # Keep only the anchor's own paths; the outer loop stops next.
+            candidate_runs = []
+        elif use_index:
+            candidate_runs = []
+            for buckets, (shift, width) in zip(segment_buckets, PHASH_SEGMENTS):
+                bucket = buckets[_segment_value(hash_value, shift, width)]
+                candidate_runs.append(bucket[bisect_right(bucket, index):])
         else:
-            # The six segments are lossless only for thresholds below six.
-            indexes_to_check = range(index + 1, total_keys)
+            candidate_runs = [range(index + 1, total_keys)]
 
-        for other_index in indexes_to_check:
-            if _was_cancelled(cancel_event):
-                break
-            if other_index <= index:
-                continue
-            other_key = hash_keys[other_index]
-            if other_key in visited_hashes:
-                continue
-            if (hash_value ^ hash_values[other_index]).bit_count() <= threshold:
-                group.extend(phash_dict[other_key])
-                visited_hashes.add(other_key)
+        matches: list[int] = []
+        for candidates in candidate_runs:
+            within_threshold = [
+                other_index
+                for other_index in candidates
+                if (hash_value ^ hash_values[other_index]).bit_count() <= threshold
+            ]
+            # A hash can share several segments with the anchor; marking it
+            # visited on its first match keeps it from being added twice.
+            for other_index in within_threshold:
+                if not visited[other_index]:
+                    visited[other_index] = True
+                    matches.append(other_index)
+        # Preserve the original member order: ascending hash index.
+        matches.sort()
 
+        for other_index in matches:
+            group.extend(phash_dict[hash_keys[other_index]])
         if len(group) > 1:
             similar_results.append(group)
 
@@ -259,16 +272,22 @@ class Scanner:
         worker_count = self._worker_count()
         max_in_flight = worker_count * 2
         file_iterator = iter(filepaths)
+        # Each future reports itself here when it finishes.  Waiting on one
+        # queue is O(1) per file, whereas wait(FIRST_COMPLETED) re-arms a
+        # waiter on every in-flight future after each completion.
+        finished: queue.SimpleQueue[Future] = queue.SimpleQueue()
 
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            pending: dict[object, str] = {}
+            pending: dict[Future, str] = {}
 
             def submit_next() -> bool:
                 try:
                     filepath = next(file_iterator)
                 except StopIteration:
                     return False
-                pending[executor.submit(worker, filepath, self._cancel_event)] = filepath
+                future = executor.submit(worker, filepath, self._cancel_event)
+                pending[future] = filepath
+                future.add_done_callback(finished.put)
                 return True
 
             for _ in range(min(max_in_flight, len(filepaths))):
@@ -280,17 +299,15 @@ class Scanner:
                         future.cancel()
                     return
 
-                completed, _ = wait(pending, return_when=FIRST_COMPLETED)
-                for future in completed:
-                    filepath = pending.pop(future)
-                    try:
-                        result = future.result()
-                    except Exception:
-                        logger.warning("Worker failed for file: %s", filepath, exc_info=True)
-                        result = ""
-                    yield filepath, result
-                    if self.cancel_requested:
-                        break
+                future = finished.get()
+                filepath = pending.pop(future)
+                try:
+                    result = future.result()
+                except Exception:
+                    logger.warning("Worker failed for file: %s", filepath, exc_info=True)
+                    result = ""
+                yield filepath, result
+                if not self.cancel_requested:
                     submit_next()
 
     def _finish(self, callback: Callable[[str, Dict], None], data: Dict) -> None:
@@ -386,7 +403,11 @@ class Scanner:
                             if entry.is_dir(follow_symlinks=False):
                                 stack.append(entry.path)
                                 continue
-                            if not entry.is_file():
+                            # Do not follow file symlinks either. A link and its
+                            # target would form a fake exact-duplicate pair, and
+                            # deleting the link path resolves to (and trashes)
+                            # the target the user chose to keep.
+                            if entry.is_symlink() or not entry.is_file():
                                 continue
                             extension = os.path.splitext(entry.name)[1].lower()
                             if extension not in SUPPORTED_EXTENSIONS:

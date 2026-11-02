@@ -544,14 +544,23 @@ function restorePendingDeletion(deletion) {
 function removeDeletedPaths(tabName, deletedPaths) {
     const currentData = tabName === 'exact' ? exactData : similarData;
     const container = tabName === 'exact' ? exactList : similarList;
-    const selectedPaths = new Set(
-        Array.from(container.querySelectorAll('.image-item.selected'))
-            .map(item => item.dataset.path)
-            .filter(path => !deletedPaths.has(path))
-    );
+    const previouslySelected = Array.from(container.querySelectorAll('.image-item.selected'))
+        .map(item => item.dataset.path);
+    const selectedPaths = new Set(previouslySelected.filter(path => !deletedPaths.has(path)));
+    const lostSelections = new Set(previouslySelected.filter(path => deletedPaths.has(path)));
     const updatedData = currentData
         .map(group => group.filter(path => !deletedPaths.has(path)))
         .filter(group => group.length > 1);
+
+    // A kept photo can be deleted from the other tab. Never leave such a group
+    // with nothing selected, or the next clean would remove every remaining copy.
+    currentData.forEach(group => {
+        if (!group.some(path => lostSelections.has(path))) return;
+        const survivors = group.filter(path => !deletedPaths.has(path));
+        if (survivors.length > 1 && !survivors.some(path => selectedPaths.has(path))) {
+            selectedPaths.add(survivors[0]);
+        }
+    });
 
     if (tabName === 'exact') {
         exactData = updatedData;
@@ -696,6 +705,29 @@ function updateFocusUI() {
     }
 }
 
+// Rows scroll inside #scroll-container, below the fixed header, so visibility
+// must be judged against the container rather than the window.
+function isRowInScrollView(row) {
+    if (!row || row.style.display === 'none') return false;
+    const viewRect = scrollContainer.getBoundingClientRect();
+    const rect = row.getBoundingClientRect();
+    return rect.bottom > viewRect.top && rect.top < viewRect.bottom;
+}
+
+// Delete cleans the focused group. If focus was scrolled out of view with the
+// mouse, fall back to the first group that is actually visible in the list.
+function findDeleteTargetRow(tabName, focusedRowIdx) {
+    const focusedRow = document.getElementById(`row-${tabName}-${focusedRowIdx}`);
+    if (isRowInScrollView(focusedRow)) return focusedRow;
+
+    const viewRect = scrollContainer.getBoundingClientRect();
+    return Array.from(document.querySelectorAll(`#tab-${tabName} .group-row`)).find(row => {
+        if (!isRowInScrollView(row)) return false;
+        const rect = row.getBoundingClientRect();
+        return rect.top >= viewRect.top || rect.bottom > viewRect.top + 100;
+    }) || null;
+}
+
 document.addEventListener('keydown', (e) => {
     // Check for Ctrl+Z undo
     if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
@@ -791,21 +823,9 @@ document.addEventListener('keydown', (e) => {
             e.preventDefault();
         }
         else if (e.key === 'Delete') {
-            // Find first visible row
-            const rows = document.querySelectorAll(`#tab-${tabName} .group-row`);
-            let targetRowId = null;
-            for (let i=0; i<rows.length; i++) {
-                if (rows[i].style.display === 'none') continue;
-                const rect = rows[i].getBoundingClientRect();
-                if (rect.top >= 0 || (rect.top < 0 && rect.bottom > 100)) {
-                    targetRowId = rows[i].id;
-                    break;
-                }
-            }
-            
-            if (targetRowId) {
-                const targetRow = document.getElementById(targetRowId);
-                const rIdx = Number(targetRow?.dataset.rowIdx);
+            const targetRow = findDeleteTargetRow(tabName, rowIdx);
+            if (targetRow) {
+                const rIdx = Number(targetRow.dataset.rowIdx);
                 if (Number.isInteger(rIdx)) triggerClean(tabName, rIdx);
             }
             e.preventDefault();
