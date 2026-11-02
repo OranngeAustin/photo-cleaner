@@ -828,6 +828,32 @@ test('when focus is scrolled away, Delete ignores groups hidden under the header
     assert.deepEqual(pending.paths, ['b2.jpg']);
 });
 
+async function flushPromises() {
+    for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve));
+}
+
+function scanAndDeleteFetch(requests, results) {
+    return async (url, options = {}) => {
+        const body = options.body ? JSON.parse(options.body) : null;
+        requests.push({ url: url.split('?')[0], body });
+        if (url === '/api/scan') return { ok: true, json: async () => ({ status: 'started' }) };
+        if (url === '/api/scan_status') {
+            return { ok: true, json: async () => ({ done: true, message: '', progress: {}, cancelled: false, results }) };
+        }
+        if (url === '/api/delete') return { ok: true, json: async () => ({ deleted: body.files, errors: [] }) };
+        return { ok: true, json: async () => ({}) };
+    };
+}
+
+async function scanFolderAndStageClean(runtime, requests) {
+    runtime.window.pywebview = { api: { choose_directory: async () => '/photos' } };
+    runtime.elements.browseBtn.dispatch('click');
+    await flushPromises();
+    runtime.elements.exactList.querySelectorAll('.clean-btn')[0].dispatch('click');
+    assert.deepEqual([...runtime.api.getPendingDeletion().paths], ['a2.jpg']);
+    requests.length = 0;
+}
+
 test('switching to a tab with fewer groups moves keyboard focus into that tab', () => {
     const runtime = createRuntime(async () => ({ ok: true, json: async () => ({}) }));
     const exactGroups = Array.from({ length: 9 }, (_, i) => [`e${i}a.jpg`, `e${i}b.jpg`]);
@@ -883,4 +909,34 @@ test('a failed delete of the only group gives keyboard focus back to it', async 
 
     await runtime.api.commitPendingDeletion();
     assert.deepEqual(runtime.api.getFocus(), { rowIdx: 0, imgIdx: 1, tab: 'exact' });
+});
+
+test('switching to a tab that needs a scan commits the staged delete first', async () => {
+    const requests = [];
+    const results = { exact: [['a1.jpg', 'a2.jpg'], ['b1.jpg', 'b2.jpg']], similar: [] };
+    const runtime = createRuntime(scanAndDeleteFetch(requests, results));
+    await scanFolderAndStageClean(runtime, requests);
+
+    runtime.document.querySelectorAll('.tab-btn')[1].dispatch('click');
+    await flushPromises();
+
+    assert.deepEqual(requests.map(request => request.url).slice(0, 2), ['/api/delete', '/api/scan']);
+    assert.deepEqual(requests[0].body.files, ['a2.jpg']);
+    assert.equal(requests[1].body.mode, 'similar');
+    assert.equal(runtime.api.getPendingDeletion(), null);
+});
+
+test('choosing a new folder commits the staged delete before scanning it', async () => {
+    const requests = [];
+    const results = { exact: [['a1.jpg', 'a2.jpg'], ['b1.jpg', 'b2.jpg']], similar: [] };
+    const runtime = createRuntime(scanAndDeleteFetch(requests, results));
+    await scanFolderAndStageClean(runtime, requests);
+
+    runtime.window.pywebview.api.choose_directory = async () => '/other';
+    runtime.elements.browseBtn.dispatch('click');
+    await flushPromises();
+
+    assert.deepEqual(requests.map(request => request.url).slice(0, 2), ['/api/delete', '/api/scan']);
+    assert.deepEqual(requests[0].body.files, ['a2.jpg']);
+    assert.equal(requests[1].body.directory, '/other');
 });

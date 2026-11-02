@@ -29,21 +29,22 @@ const scrollContainer = document.getElementById('scroll-container');
 
 // Tab Switching
 tabs.forEach(tab => {
-    tab.addEventListener('click', () => {
+    tab.addEventListener('click', async () => {
+        const mode = tab.dataset.tab;
         tabs.forEach(t => t.classList.remove('active'));
         tabContents.forEach(c => c.classList.remove('active'));
         tab.classList.add('active');
         document.getElementById(`tab-${tab.dataset.tab}`).classList.add('active');
-        focusFirstVisibleRow(tab.dataset.tab);
-        
+        focusFirstVisibleRow(mode);
+
         // Auto-scan if folder is chosen and this tab has no data yet
-        if (currentDirectory) {
-            if (currentFocus.tab === 'exact' && exactData.length === 0) {
-                startScan(currentDirectory, 'exact');
-            } else if (currentFocus.tab === 'similar' && similarData.length === 0) {
-                startScan(currentDirectory, 'similar');
-            }
-        }
+        const tabData = mode === 'exact' ? exactData : similarData;
+        if (!currentDirectory || tabData.length > 0) return;
+        // Finish a staged delete first, or the new results could still list
+        // the files it is about to remove.
+        await commitPendingDeletion();
+        // The user may have switched tabs again while the delete was running.
+        if (currentFocus.tab === mode) startScan(currentDirectory, mode);
     });
 });
 
@@ -343,6 +344,9 @@ browseBtn.addEventListener('click', async () => {
     if (window.pywebview && window.pywebview.api) {
         const folder = await window.pywebview.api.choose_directory();
         if (folder) {
+            // Finish a staged delete while its folder is still the authorized
+            // scan root; the scan below replaces that root.
+            await commitPendingDeletion();
             currentDirectory = folder;
             currentDirSpan.textContent = folder;
             // Clear old data
@@ -609,13 +613,20 @@ function removeDeletedPathsFromCachedResults(deletedPaths) {
     });
 }
 
-async function commitPendingDeletion() {
+// Returns the in-flight request, so callers can wait for a delete that the
+// undo timer (or another caller) has already started.
+function commitPendingDeletion() {
     const deletion = pendingDeletion;
-    if (!deletion || deletion.committing) return;
+    if (!deletion) return Promise.resolve();
+    if (!deletion.committing) {
+        clearTimeout(deletion.timerId);
+        deletion.committing = true;
+        deletion.request = sendPendingDeletion(deletion);
+    }
+    return deletion.request || Promise.resolve();
+}
 
-    clearTimeout(deletion.timerId);
-    deletion.committing = true;
-
+async function sendPendingDeletion(deletion) {
     try {
         const response = await fetch('/api/delete', {
             method: 'POST',
