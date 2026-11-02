@@ -263,6 +263,15 @@ def generate_thumbnail(image_path: str, max_size: tuple[int, int] = (256, 256)) 
         return b""
 
 
+def _is_within(path: str, root_key: str) -> bool:
+    """Whether ``path`` resolves inside ``root_key`` (a normcased real path)."""
+    try:
+        real_key = os.path.normcase(os.path.realpath(path))
+        return os.path.commonpath([real_key, root_key]) == root_key
+    except (OSError, ValueError):  # ValueError: paths on different drives.
+        return False
+
+
 def _segment_value(value: int, shift: int, width: int) -> int:
     return (value >> shift) & ((1 << width) - 1)
 
@@ -506,6 +515,7 @@ class Scanner:
         file_sizes: dict[str, int] = {}
         skipped_files = 0
         seen_realpaths: set[str] = set()
+        root_key = os.path.normcase(os.path.realpath(root_dir))
         stack = [root_dir]
 
         while stack and not self.cancel_requested:
@@ -527,8 +537,17 @@ class Scanner:
                             # Match os.walk(..., followlinks=False): traverse regular
                             # directories but do not descend into symlink directories.
                             # Windows junctions are not symlinks here, so they are
-                            # followed; seen_realpaths stops junction loops.
+                            # followed while they stay inside the scan root, and
+                            # seen_realpaths stops junction loops.  Results behind a
+                            # junction that leaves the root could never be previewed
+                            # or deleted, and one pointing at an ancestor would scan
+                            # that whole tree.  (DirEntry.is_junction is new in 3.12.)
                             if entry.is_dir(follow_symlinks=False):
+                                if getattr(entry, "is_junction", lambda: False)() and not _is_within(
+                                    entry.path, root_key
+                                ):
+                                    logger.debug("Skipping junction outside the scan root: %s", entry.path)
+                                    continue
                                 stack.append(entry.path)
                                 continue
                             # Do not follow file symlinks either. A link and its

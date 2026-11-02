@@ -349,6 +349,38 @@ def test_scan_directory_symlink_cycle(tmp_path):
     assert Scanner()._enumerate_image_files(str(d1), collect_sizes=False)[0] == [str(p1)]
 
 
+def _junction_or_skip(link, target):
+    import subprocess
+    try:
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("Requires Windows and privileges to create a junction")
+
+
+def test_enumeration_skips_junctions_that_lead_outside_the_scan_root(tmp_path):
+    # Q3: results behind such a junction could be listed but never previewed
+    # or deleted, and one pointing at an ancestor would scan that whole tree.
+    root = tmp_path / "root"
+    inside = root / "inside"
+    inside.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    create_image(inside / "kept.jpg")
+    create_image(outside / "elsewhere.jpg")
+    _junction_or_skip(root / "to_outside", outside)
+    _junction_or_skip(inside / "to_ancestor", tmp_path)
+    # A junction that stays inside the root is still followed; the real-path
+    # check lists its target once.
+    _junction_or_skip(root / "to_inside", inside)
+
+    files, _, _ = Scanner()._enumerate_image_files(str(root), collect_sizes=False)
+
+    assert [os.path.realpath(path) for path in files] == [os.path.realpath(inside / "kept.jpg")]
+
+
 def _symlink_or_skip(link, target):
     try:
         os.symlink(target, link)
