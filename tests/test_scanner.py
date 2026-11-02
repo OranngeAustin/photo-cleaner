@@ -673,3 +673,15 @@ def test_a_failing_done_callback_does_not_escape_the_scan_thread(tmp_path):
 
     assert "done" in calls
     assert scanner.is_scanning is False
+
+
+@pytest.mark.parametrize("size", [1_000, 65_536, 70_000])
+def test_prefix_hash_covers_exactly_the_first_64_kib(tmp_path, size):
+    import hashlib
+
+    data = os.urandom(size)
+    path = tmp_path / "file.jpg"
+    path.write_bytes(data)
+
+    expected = hashlib.sha256(data[:scanner_module.PREFIX_HASH_SIZE]).hexdigest()
+    assert scanner_module.get_file_prefix_hash(str(path)) == expected
