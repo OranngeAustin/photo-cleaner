@@ -65,3 +65,40 @@
 - 六段 pHash 索引在阈值 ≤ 5 时不会漏检（11×4 + 10×2 = 64 位，抽屉原理）；锚点（非传递）语义的实现与 CLAUDE.md 一致。
 - 只要回调本身不抛异常，`scan_directory` 的每条路径都会发出 `done`。
 - 前端没有 XSS：`innerHTML` 只插入数字，路径都经过 `encodeURIComponent` 或 `textContent`。
+
+## 安全（阶段 3）
+
+范围：全仓库（`main.py`、`backend/`、`web/`、`tests/`、`requirements.txt`、`Start_PhotoCleaner.bat`）。
+编号与上文接续。威胁模型：本地桌面应用，HTTP 服务只绑定 `127.0.0.1` 的随机端口，没有鉴权；
+攻击面是「用户机器上同时打开的恶意网页」和「被扫描目录中的不可信文件」。
+
+| 编号 | 类别 | 位置 | 问题 | 证据 / 触发场景 | 修复建议 | 把握 |
+|---|---|---|---|---|---|---|
+| **M11** | 鉴权 / 越权 | `main.py:31, 137-271` | **没有校验 Host 和 Origin，也没有会话令牌，存在 DNS 重绑定风险** | 攻击者网页把自己的域名重绑定到 `127.0.0.1:<端口>` 后，就和应用同源了，可以：① `POST /api/scan` 扫描任意目录；② 用 `/api/scan_status` 读到结果路径；③ 用 `/api/image` 读出照片原图；④ 用 `/api/delete` 把重复照片移进回收站。结果白名单约束不了攻击者，因为扫描本身就是攻击者发起的。**已验证**：带 `Host: attacker.example`、`Origin: http://attacker.example` 的 `POST /api/scan` 会被正常处理。缓解因素：端口每次随机，攻击者需要先探测端口 | 加 `TrustedHostMiddleware(allowed_hosts=["127.0.0.1", "localhost"])`；启动时生成随机令牌，通过 `js_api` 交给前端，每个 `/api/*` 请求都校验；`/api/scan` 只接受 `choose_directory` 返回过的目录 | 机制高，可利用性中 |
+| L14 | CSRF | `main.py:195` | `POST /api/cancel_scan` 不带请求体，属于「简单请求」 | 任何网页都能用 `fetch(…, {method:'POST', mode:'no-cors'})` 取消正在进行的扫描（已验证返回 200）。影响很小，只是取消扫描。其余写接口都需要 JSON：`text/plain` 会被 FastAPI 的 strict content-type 拒绝（422，已验证）；`application/json` 跨源请求要先过预检，而 OPTIONS 返回 405（已验证），浏览器会拦下 | 和 M11 的令牌方案一起解决 | 高 |
+| L15 | 信息暴露 | `main.py:31` | `/docs`、`/redoc`、`/openapi.json` 默认开着（均返回 200） | 对本地应用影响很小，但会给 M11 的攻击者提供现成的接口清单 | `FastAPI(docs_url=None, redoc_url=None, openapi_url=None)` | 高 |
+| (H1) | 越权 | `main.py:211, 215` | 授权检查的是 `realpath`，但用户选中的是链接路径 | 见 H1：删除链接时，实际被删的是另一个文件（链接目标），超出了用户的选择 | 见 H1 | 高 |
+
+逐项检查，结论如下：
+
+- **注入**
+  - SQL：项目没有数据库。
+  - 命令：应用代码里没有 `subprocess`、`os.system` 或 `shell=True`；只有一个测试用固定参数调用了 `cmd`。
+  - 模板：没有服务端模板。
+  - 前端：`innerHTML` 只拼接数字。查询参数全部经过 `encodeURIComponent`，文本全部用 `textContent`。
+  - 结论：**未发现问题**。
+- **鉴权与越权**：见 M11、L14、H1。另外：
+  - 文件端点统一经过 `is_result_path_allowed`，即同时要求「路径在扫描根内」和「路径在结果白名单中」，大小写、`..`、跨盘符的处理都正确。
+  - `js_api` 只暴露了 `choose_directory`。
+  - `StaticFiles` 由 Starlette 防护路径穿越。
+- **敏感信息**
+  - 没有硬编码的密钥、令牌或密码（已 grep）。
+  - 日志只在 WARNING 级别把文件路径输出到 stderr，不写日志文件，没有凭据。
+  - `Start_PhotoCleaner.bat` 暴露了作者本机的 conda 路径，属于信息性问题。
+- **不安全的反序列化**
+  - 没有 `pickle`、`yaml.load`、`eval` 或 `exec`；请求体都经过 pydantic 校验。
+  - 唯一不可信的输入是图片文件，解码由 Pillow / pillow-heif 完成，依赖默认的 `MAX_IMAGE_PIXELS` 防护（参见 M7）。
+- **依赖中已知的高危版本**
+  - 用 `pip-audit 2.10.1 -r requirements.txt` 按当前最新版本解析，结果是 `No known vulnerabilities found`。本地实测版本见 `01-architecture.md` §4。
+  - 依赖没有锁定版本（L13），所以「当前没有已知漏洞」只代表审计时刻的状态。建议锁定版本后，在 CI 里定期运行 pip-audit。
+  - Node 端没有 npm 依赖。
