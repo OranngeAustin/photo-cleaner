@@ -330,13 +330,17 @@ def test_scan_directory_symlink_cycle(tmp_path):
     j_path = d2 / "j_d1"
     try:
         subprocess.run(["cmd", "/c", "mklink", "/J", str(j_path), str(d1)], check=True, stdout=subprocess.DEVNULL)
-    except subprocess.CalledProcessError:
-        pytest.skip("Requires privileges to create junction")
+    except (OSError, subprocess.CalledProcessError):
+        # OSError: no cmd.exe (not Windows); CalledProcessError: no privilege.
+        pytest.skip("Requires Windows and privileges to create a junction")
         
     scanner = Scanner()
     results = []
     scanner.scan_directory(str(d1), 'exact', lambda ev, data: results.append((ev, data)))
     assert results[-1][0] == 'done'
+    # The junction leads back to d1; real-path de-duplication must stop the
+    # loop, so the image is listed exactly once.
+    assert Scanner()._enumerate_image_files(str(d1), collect_sizes=False)[0] == [str(p1)]
 
 
 def _symlink_or_skip(link, target):
@@ -577,3 +581,21 @@ def test_thumbnail_reserves_the_reduced_jpeg_decode_and_composites_after_shrinki
     with Image.open(io.BytesIO(png_thumbnail)) as thumbnail:
         assert thumbnail.size == (256, 192)
         assert all(channel > 235 for channel in thumbnail.getpixel((128, 96)))
+
+
+def test_scan_directory_does_not_loop_through_a_directory_symlink(tmp_path):
+    # M9: a portable counterpart of the junction cycle test above.
+    d1 = tmp_path / "d1"
+    d2 = d1 / "d2"
+    d2.mkdir(parents=True)
+    image = d1 / "img1.jpg"
+    create_image(image)
+    _symlink_or_skip(d2 / "back_to_d1", d1)
+
+    files, _, skipped = Scanner()._enumerate_image_files(str(d1), collect_sizes=False)
+    results = []
+    Scanner().scan_directory(str(d1), "exact", lambda event, data: results.append((event, data)))
+
+    assert files == [str(image)]
+    assert skipped == 0
+    assert results[-1][0] == "done"
