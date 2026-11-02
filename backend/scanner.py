@@ -566,6 +566,15 @@ class Scanner:
                             if extension not in SUPPORTED_EXTENSIONS:
                                 continue
                             filepath = entry.path
+                            try:
+                                filepath.encode("utf-8")
+                            except UnicodeEncodeError:
+                                # An unpaired UTF-16 surrogate, which NTFS allows in a
+                                # name, cannot be sent as JSON: one such result made
+                                # /api/scan_status fail and lost the whole scan.
+                                logger.warning("Path is not valid Unicode: %r", filepath)
+                                skipped_files += 1
+                                continue
                             if len(filepath) > 259:
                                 logger.warning("Path exceeds MAX_PATH (260): %s", filepath)
                                 skipped_files += 1

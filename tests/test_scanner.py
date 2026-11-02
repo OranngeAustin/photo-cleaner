@@ -822,3 +822,23 @@ def test_a_scan_counts_files_it_could_not_read(tmp_path, monkeypatch, mode):
     done = results[-1][1]
     assert [[Path(path).name for path in group] for group in done[mode]] == [["a.jpg", "b.jpg"]]
     assert done["unreadable_files"] == 1
+
+
+def test_a_scan_skips_and_counts_names_that_are_not_valid_unicode(tmp_path):
+    """W02: NTFS allows an unpaired UTF-16 surrogate in a file name (and on
+    Linux, name bytes that are not UTF-8 decode to one).  Such a path cannot
+    be encoded as JSON, so /api/scan_status failed and the whole scan was lost."""
+    create_image(tmp_path / "a.jpg")
+    content = (tmp_path / "a.jpg").read_bytes()
+    (tmp_path / "b.jpg").write_bytes(content)
+    try:
+        (tmp_path / "bad\udc80.jpg").write_bytes(content)
+    except (OSError, UnicodeError):
+        pytest.skip("This file system cannot store an unpaired surrogate in a file name")
+
+    results = []
+    Scanner(max_workers=1).scan_directory(str(tmp_path), "exact", lambda event, data: results.append((event, data)))
+
+    done = results[-1][1]
+    assert [[Path(path).name for path in group] for group in done["exact"]] == [["a.jpg", "b.jpg"]]
+    assert done["skipped_files"] == 1

@@ -471,7 +471,7 @@ async function pollStatus(mode, failures = 0) {
         }
         const skipped = data.results.skipped_files || 0;
         if (skipped > 0) {
-            postMsg += (postMsg ? ' ' : '') + `(${skipped} file(s) skipped due to path length)`;
+            postMsg += (postMsg ? ' ' : '') + `(${skipped} file(s) skipped: path too long or invalid file name)`;
         }
         // Locked by another program or failing to decode: left out of the results.
         const unreadable = data.results.unreadable_files || 0;
