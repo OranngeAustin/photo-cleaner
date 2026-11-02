@@ -114,6 +114,30 @@ def get_image_phash(filepath: str, cancel_event: threading.Event | None = None) 
         return ""
 
 
+EXIF_ORIENTATION_TAG = 274
+# The same mapping as PIL.ImageOps.exif_transpose.
+_ORIENTATION_TRANSPOSE = {
+    2: Image.Transpose.FLIP_LEFT_RIGHT,
+    3: Image.Transpose.ROTATE_180,
+    4: Image.Transpose.FLIP_TOP_BOTTOM,
+    5: Image.Transpose.TRANSPOSE,
+    6: Image.Transpose.ROTATE_270,
+    7: Image.Transpose.TRANSVERSE,
+    8: Image.Transpose.ROTATE_90,
+}
+_SWAPS_AXES = {Image.Transpose.TRANSPOSE, Image.Transpose.TRANSVERSE, Image.Transpose.ROTATE_90, Image.Transpose.ROTATE_270}
+
+
+def _orientation_transpose(img: Image.Image) -> Image.Transpose | None:
+    """Return the transpose that displays ``img`` upright, if its EXIF needs one."""
+    try:
+        orientation = img.getexif().get(EXIF_ORIENTATION_TAG)
+    except Exception:  # Malformed EXIF must not cost the whole thumbnail.
+        logger.debug("Unreadable EXIF orientation: %s", getattr(img, "filename", ""), exc_info=True)
+        return None
+    return _ORIENTATION_TRANSPOSE.get(orientation) if isinstance(orientation, int) else None
+
+
 @lru_cache(maxsize=512)
 def _generate_thumbnail_cached(
     image_path: str,
@@ -127,6 +151,12 @@ def _generate_thumbnail_cached(
     del mtime_ns, file_size
     try:
         with Image.open(image_path) as img:
+            # Read the orientation now: the conversions below drop metadata.
+            # The bounding box applies to the upright image, and only the small
+            # thumbnail is rotated, never the full-size decode.
+            transpose = _orientation_transpose(img)
+            if transpose in _SWAPS_AXES:
+                max_width, max_height = max_height, max_width
             max_size = (max_width, max_height)
             if img.format == 'JPEG':
                 img.draft('RGB', max_size)
@@ -143,6 +173,8 @@ def _generate_thumbnail_cached(
             elif img.mode != "RGB":
                 img = img.convert("RGB")
             img.thumbnail(max_size)
+            if transpose is not None:
+                img = img.transpose(transpose)
             img_byte_arr = io.BytesIO()
             img.save(img_byte_arr, format='JPEG', quality=85)
             return img_byte_arr.getvalue()

@@ -458,3 +458,23 @@ def test_exact_scan_full_hashes_small_files_that_grew_after_enumeration(tmp_path
     groups = Scanner(max_workers=2)._scan_exact(sorted(stale_sizes), stale_sizes, lambda *_: None)
 
     assert groups == [[str(copy), str(first)]]
+
+
+def test_thumbnail_follows_exif_orientation(tmp_path):
+    # M3: phones store portrait shots as landscape pixels plus Orientation=6.
+    image = Image.new("RGB", (400, 200), "red")
+    image.paste((0, 0, 255), (200, 0, 400, 200))
+    exif = Image.Exif()
+    exif[274] = 6
+    path = tmp_path / "portrait.jpg"
+    image.save(path, exif=exif)
+    clear_thumbnail_cache()
+
+    thumbnail = Image.open(io.BytesIO(scanner_module.generate_thumbnail(str(path))))
+
+    assert thumbnail.size == (128, 256)
+    # Orientation 6 means "rotate 90 degrees clockwise to display", so the
+    # red left half of the stored pixels ends up on top.
+    top, bottom = thumbnail.getpixel((64, 32)), thumbnail.getpixel((64, 224))
+    assert top[0] > 200 and top[2] < 60
+    assert bottom[2] > 200 and bottom[0] < 60
