@@ -249,7 +249,12 @@ def test_thumbnail_cache_uses_source_metadata_for_invalidation(tmp_path):
     assert first == second
     assert scanner_module._generate_thumbnail_cached.cache_info().hits == 1
 
-    create_image(image_path, color="blue")
+    # Solid-colour JPEGs of one size encode to the same byte count, and NTFS
+    # can give back-to-back writes the same mtime, so change both explicitly.
+    first_stat = image_path.stat()
+    create_image(image_path, color="blue", size=(120, 100))
+    os.utime(image_path, ns=(first_stat.st_atime_ns, first_stat.st_mtime_ns + 1_000_000_000))
+    assert image_path.stat().st_size != first_stat.st_size
     third = scanner.generate_thumbnail(str(image_path))
     assert third != b""
     assert scanner_module._generate_thumbnail_cached.cache_info().misses == 2
