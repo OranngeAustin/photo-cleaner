@@ -75,6 +75,8 @@ cd photo_cleaner
 
 # 2. 安装依赖
 pip install fastapi uvicorn pillow pillow-heif imagehash pywebview send2trash
+# 或者装成测试通过时的确切版本（可复现，见 requirements.lock 文件头）：
+# pip install -r requirements.txt -c requirements.lock
 
 # 3. 运行程序
 python main.py

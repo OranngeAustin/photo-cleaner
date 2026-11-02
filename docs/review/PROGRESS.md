@@ -37,7 +37,7 @@
 | L10 | ✅ 已修复 |  | 开始提交时提示改为「正在移到回收站」并隐藏 Undo 按钮；部分失败和失败提示不带 Undo，5 秒后自动隐藏（被更新的提示替换时不隐藏） |
 | L11 | ✅ 已修复（部分不成立） |  | 删除未使用的 `activeCountdownId`、`countdownInterval`，删除从不读取的 `pendingDeletion.type`，删除无效规则 `.group-row.focused`；`triggerClean` 和批量清理改为共用 `stageDeletion`。**两处已不成立、未改**：`scrollContainer` 现在被 H4 的修复使用；`.lightbox img.zoomed` 有效（`setZoom` 会给图片加 `zoomed`） |
 | L12 | ⬜ 待处理 | | |
-| L13 | ⬜ 待处理 | | |
+| L13 | ✅ 已修复 |  | 新增 `requirements.lock`（当前测试环境的完整依赖闭包，精确版本），作为 constraints 文件可选使用：`pip install -r requirements.txt -c requirements.lock`；`requirements.txt` 不变。新增测试保证锁文件覆盖每个直接依赖以及影响 pHash 的 NumPy/SciPy/PyWavelets |
 
 ### 第三轮决策记录
 

@@ -10,6 +10,7 @@ Photo Cleaner: a Windows desktop duplicate-photo cleaner. A FastAPI backend serv
 
 ```bash
 pip install -r requirements.txt pytest   # pytest is not in requirements.txt
+pip install -r requirements.txt -c requirements.lock pytest   # same, at the exact versions the tests passed with
 python main.py                           # launches the server on a random loopback port, then the pywebview window
 python -m pytest -q                      # backend tests (tests/test_main.py, tests/test_scanner.py)
 python -m pytest tests/test_scanner.py::test_scanner_exact_mode -q   # single Python test
