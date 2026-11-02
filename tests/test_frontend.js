@@ -314,6 +314,7 @@ globalThis.__frontendTest = {
     getFocus: () => JSON.parse(JSON.stringify(currentFocus)),
     setFocus,
     setPendingDeletion: value => { pendingDeletion = value; },
+    setRecycleBinAvailable: value => { recycleBinAvailable = value; },
     setExactData: value => { exactData = value; },
     setSimilarData: value => { similarData = value; },
     snapshot: () => JSON.parse(JSON.stringify({ exactData, similarData })),
@@ -838,13 +839,16 @@ async function flushPromises() {
     for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve));
 }
 
-function scanAndDeleteFetch(requests, results) {
+function scanAndDeleteFetch(requests, results, statusExtras = {}) {
     return async (url, options = {}) => {
         const body = options.body ? JSON.parse(options.body) : null;
         requests.push({ url: url.split('?')[0], body });
         if (url === '/api/scan') return { ok: true, json: async () => ({ status: 'started' }) };
         if (url === '/api/scan_status') {
-            return { ok: true, json: async () => ({ done: true, message: '', progress: {}, cancelled: false, results }) };
+            return {
+                ok: true,
+                json: async () => ({ done: true, message: '', progress: {}, cancelled: false, results, ...statusExtras }),
+            };
         }
         if (url === '/api/delete') return { ok: true, json: async () => ({ deleted: body.files, errors: [] }) };
         return { ok: true, json: async () => ({}) };
@@ -1008,6 +1012,103 @@ test('choosing a new folder commits the staged delete before scanning it', async
     assert.deepEqual(requests.map(request => request.url).slice(0, 2), ['/api/delete', '/api/scan']);
     assert.deepEqual(requests[0].body.files, ['a2.jpg']);
     assert.equal(requests[1].body.directory, '/other');
+});
+
+test('with a Recycle Bin a clean asks nothing and the delete is not permanent', async () => {
+    const requests = [];
+    const confirmations = [];
+    const results = { exact: [['a1.jpg', 'a2.jpg'], ['b1.jpg', 'b2.jpg']], similar: [] };
+    const runtime = createRuntime(
+        scanAndDeleteFetch(requests, results, { recycle_bin_available: true }),
+        message => { confirmations.push(message); return true; }
+    );
+    await scanFolderAndStageClean(runtime, requests);
+    assert.match(runtime.elements.toastMessage.textContent, /moving to Recycle Bin/);
+
+    await runtime.api.commitPendingDeletion();
+
+    assert.deepEqual(confirmations, []);
+    assert.deepEqual(requests[0].body, { files: ['a2.jpg'], permanent: false });
+});
+
+test('on a drive without a Recycle Bin a clean asks first and the delete says the user agreed', async () => {
+    const requests = [];
+    const confirmations = [];
+    const results = { exact: [['a1.jpg', 'a2.jpg'], ['b1.jpg', 'b2.jpg']], similar: [] };
+    const runtime = createRuntime(
+        scanAndDeleteFetch(requests, results, { recycle_bin_available: false }),
+        message => { confirmations.push(message); return true; }
+    );
+    await scanFolderAndStageClean(runtime, requests);
+    assert.equal(confirmations.length, 1);
+    assert.match(confirmations[0], /没有回收站[\s\S]*永久删除 1 张照片/);
+    assert.match(runtime.elements.toastMessage.textContent, /deleting permanently in 3 seconds/);
+
+    const request = runtime.api.commitPendingDeletion();
+    assert.match(runtime.elements.toastMessage.textContent, /^Permanently deleting 1 photo/);
+    await request;
+
+    assert.deepEqual(requests[0].body, { files: ['a2.jpg'], permanent: true });
+});
+
+test('declining the permanent-delete warning stages nothing', async () => {
+    const requests = [];
+    const results = { exact: [['a1.jpg', 'a2.jpg'], ['b1.jpg', 'b2.jpg']], similar: [] };
+    const runtime = createRuntime(
+        scanAndDeleteFetch(requests, results, { recycle_bin_available: false }),
+        () => false
+    );
+    runtime.window.pywebview = { api: { choose_directory: async () => '/photos' } };
+    runtime.elements.browseBtn.dispatch('click');
+    await flushPromises();
+    const rows = runtime.elements.exactList.querySelectorAll('.group-row');
+
+    rows[0].querySelector('.clean-btn').dispatch('click');
+    runtime.document.dispatch('keydown', { key: 'Delete' });
+    runtime.elements.autoDedupBtn.dispatch('click');
+
+    assert.equal(runtime.api.getPendingDeletion(), null);
+    assert.ok(rows.every(row => row.style.display !== 'none'));
+});
+
+test('similar bulk delete without a Recycle Bin asks once and says the delete is permanent', () => {
+    const confirmations = [];
+    const runtime = createRuntime(
+        async () => ({ ok: true, json: async () => ({}) }),
+        message => { confirmations.push(message); return true; }
+    );
+    runtime.api.setRecycleBinAvailable(false);
+    const groups = [['s1.jpg', 's2.jpg']];
+    runtime.api.setSimilarData(groups);
+    runtime.api.renderList(groups, runtime.elements.similarList, 'similar');
+
+    runtime.elements.similarAutoDedupBtn.dispatch('click');
+
+    assert.equal(confirmations.length, 1);
+    assert.match(confirmations[0], /未勾选的高度相似照片[\s\S]*永久删除/);
+    assert.equal(runtime.api.getPendingDeletion().permanent, true);
+});
+
+test('a delete refused for lack of a Recycle Bin makes the next clean ask first', async () => {
+    const confirmations = [];
+    const runtime = createRuntime(
+        async (_, options) => {
+            const files = JSON.parse(options.body).files;
+            return { ok: true, json: async () => ({ deleted: [], errors: files, no_recycle_bin: files }) };
+        },
+        message => { confirmations.push(message); return true; }
+    );
+    renderExactRowsForDelete(runtime);
+    runtime.api.setFocus('exact', 0, 0);
+    runtime.document.dispatch('keydown', { key: 'Delete' });
+    assert.equal(confirmations.length, 0);
+
+    await runtime.api.commitPendingDeletion();
+    assert.match(runtime.elements.toastMessage.textContent, /1 cannot go to the Recycle Bin/);
+
+    runtime.document.dispatch('keydown', { key: 'Delete' });
+    assert.equal(confirmations.length, 1);
+    assert.equal(runtime.api.getPendingDeletion().permanent, true);
 });
 
 function recordingDeleteFetch(requests) {

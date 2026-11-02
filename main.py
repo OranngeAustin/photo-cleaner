@@ -1,5 +1,6 @@
 import logging
 import os
+import stat
 import sys
 import threading
 import time
@@ -105,6 +106,7 @@ scan_state = {
     "done": False,
     "cancelled": False,
     "results": {"exact": [], "similar": []},
+    "recycle_bin_available": True,
 }
 
 
@@ -115,6 +117,8 @@ class ScanRequest(BaseModel):
 
 class DeleteRequest(BaseModel):
     files: List[str]
+    # The user agreed to delete files that cannot go to the Recycle Bin.
+    permanent: bool = False
 
 
 class Api:
@@ -266,6 +270,90 @@ def _matches_scan_fingerprint(path: str) -> bool:
     return current is not None and current in recorded
 
 
+# Windows has no Recycle Bin on removable drives, network shares or RAM disks,
+# the user can turn it off, and a file larger than the bin does not fit.  In
+# each case send2trash deletes the file permanently without saying so (Q1).
+_DRIVE_FIXED = 3
+_RECYCLE_BIN_VOLUMES_KEY = r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume"
+_EXPLORER_POLICIES_KEY = r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"
+
+if os.name == "nt":
+    import ctypes
+    import winreg
+    from ctypes import wintypes
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.GetVolumePathNameW.argtypes = (wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD)
+    _kernel32.GetVolumePathNameW.restype = wintypes.BOOL
+    _kernel32.GetVolumeNameForVolumeMountPointW.argtypes = (wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD)
+    _kernel32.GetVolumeNameForVolumeMountPointW.restype = wintypes.BOOL
+    _kernel32.GetDriveTypeW.argtypes = (wintypes.LPCWSTR,)
+    _kernel32.GetDriveTypeW.restype = wintypes.UINT
+
+
+def _volume_root(path: str) -> str | None:
+    """Return the root of the volume holding ``path``, e.g. ``D:\\``."""
+    buffer = ctypes.create_unicode_buffer(32768)
+    if not _kernel32.GetVolumePathNameW(path, buffer, len(buffer)):
+        return None
+    return buffer.value
+
+
+def _drive_type(volume_root: str) -> int:
+    return _kernel32.GetDriveTypeW(volume_root)
+
+
+def _registry_number(root_key, sub_key: str, name: str) -> int | None:
+    try:
+        with winreg.OpenKey(root_key, sub_key) as key:
+            value, _ = winreg.QueryValueEx(key, name)
+    except OSError:
+        return None
+    return value if isinstance(value, int) else None
+
+
+def _recycle_bin_settings(volume_root: str) -> tuple[bool, int | None]:
+    """Return whether the bin is turned off, and its size limit in bytes."""
+    for root_key in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        if _registry_number(root_key, _EXPLORER_POLICIES_KEY, "NoRecycleFiles"):
+            return True, None
+    buffer = ctypes.create_unicode_buffer(64)
+    if not _kernel32.GetVolumeNameForVolumeMountPointW(volume_root, buffer, len(buffer)):
+        return False, None
+    # "\\?\Volume{GUID}\" keeps its settings under "...\Volume\{GUID}"; a
+    # drive whose settings were never changed has no key and uses defaults.
+    guid_start = buffer.value.find("{")
+    if guid_start < 0:
+        return False, None
+    volume_key = _RECYCLE_BIN_VOLUMES_KEY + "\\" + buffer.value[guid_start:].rstrip("\\")
+    turned_off = _registry_number(winreg.HKEY_CURRENT_USER, volume_key, "NukeOnDelete")
+    capacity_mb = _registry_number(winreg.HKEY_CURRENT_USER, volume_key, "MaxCapacity")
+    return bool(turned_off), capacity_mb * 1024 * 1024 if capacity_mb else None
+
+
+def _recycle_bin_available(path: str, size: int = 0) -> bool:
+    """Whether send2trash would put a file of ``size`` bytes at ``path`` in the Recycle Bin."""
+    if os.name != "nt":
+        return True
+    volume_root = _volume_root(path)
+    if volume_root is None or _drive_type(volume_root) != _DRIVE_FIXED:
+        return False
+    turned_off, capacity = _recycle_bin_settings(volume_root)
+    return not turned_off and (capacity is None or size <= capacity)
+
+
+def _delete_permanently(path: str) -> None:
+    try:
+        os.remove(path)
+    except PermissionError:
+        # Windows will not delete a read-only file; the Recycle Bin path
+        # takes such files, so this one does too.
+        if os.access(path, os.W_OK):
+            raise
+        os.chmod(path, stat.S_IWRITE)
+        os.remove(path)
+
+
 @app.post("/api/scan")
 def start_scan(req: ScanRequest):
     global active_scanner, allowed_scan_root
@@ -274,6 +362,7 @@ def start_scan(req: ScanRequest):
         return JSONResponse({"error": "Invalid directory"}, status_code=400)
 
     scan_root = _resolve_path(req.directory)
+    recycle_bin_available = _recycle_bin_available(scan_root)
     scan_job = Scanner()
     with scan_lock:
         if active_scanner is not None:
@@ -292,6 +381,8 @@ def start_scan(req: ScanRequest):
         scan_state["done"] = False
         scan_state["cancelled"] = False
         scan_state["results"] = {"exact": [], "similar": []}
+        # The page asks before staging a delete that cannot be undone.
+        scan_state["recycle_bin_available"] = recycle_bin_available
     clear_thumbnail_cache()
 
     def callback(event_type: str, data: dict) -> None:
@@ -359,6 +450,9 @@ def cancel_scan():
 def delete_files(req: DeleteRequest):
     success: list[str] = []
     errors: list[str] = []
+    # Refused because they cannot go to the Recycle Bin and the request did
+    # not say the user agreed to delete them permanently.
+    no_recycle_bin: list[str] = []
     for requested_path in req.files:
         try:
             # Trashing a symlink would resolve to, and remove, a different file
@@ -374,7 +468,15 @@ def delete_files(req: DeleteRequest):
                 logger.warning("File changed since the scan, not deleting: %s", requested_path)
                 errors.append(requested_path)
                 continue
-            send2trash(real_path)
+            if _recycle_bin_available(real_path, os.path.getsize(real_path)):
+                send2trash(real_path)
+            elif req.permanent:
+                _delete_permanently(real_path)
+            else:
+                logger.warning("No Recycle Bin for this file, not deleting it without consent: %s", requested_path)
+                errors.append(requested_path)
+                no_recycle_bin.append(requested_path)
+                continue
             success.append(requested_path)
             # Resolve before taking the lock: realpath touches the file system.
             path_key = _path_key(real_path)
@@ -389,7 +491,10 @@ def delete_files(req: DeleteRequest):
 
     # The thumbnail cache is not cleared here: its key includes each file's
     # size and mtime, and deleted paths are no longer allowed anyway.
-    return {"deleted": success, "errors": errors}
+    response = {"deleted": success, "errors": errors}
+    if no_recycle_bin:
+        response["no_recycle_bin"] = no_recycle_bin
+    return response
 
 
 @app.get("/api/thumbnail")

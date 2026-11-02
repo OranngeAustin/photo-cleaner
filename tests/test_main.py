@@ -1,5 +1,7 @@
 import asyncio
 import os
+import stat
+import string
 import subprocess
 import sys
 import textwrap
@@ -14,6 +16,14 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import main
 from backend.scanner import Scanner
+
+REAL_RECYCLE_BIN_AVAILABLE = main._recycle_bin_available
+
+
+@pytest.fixture(autouse=True)
+def _recycle_bin_everywhere(monkeypatch):
+    """Keep delete tests independent of this machine's Recycle Bin settings."""
+    monkeypatch.setattr(main, "_recycle_bin_available", lambda path, size=0: True)
 
 
 def _save_scan_state():
@@ -366,6 +376,107 @@ def test_a_finished_scan_records_the_fingerprints_that_delete_checks(tmp_path, m
     finally:
         _restore_scan_state(saved_state)
         main.result_fingerprints_by_mode = saved_fingerprints
+
+
+def _allow_exact_results(root, *paths):
+    main.allowed_scan_root = str(root)
+    main.allowed_result_paths_by_mode = {
+        "exact": {main._path_key(str(path)) for path in paths},
+        "similar": set(),
+    }
+
+
+def test_without_a_recycle_bin_files_are_deleted_only_with_the_users_consent(tmp_path, monkeypatch):
+    """Q1: send2trash deleted such files permanently without saying so."""
+    saved_state = _save_scan_state()
+    photo = tmp_path / "photo.jpg"
+    read_only = tmp_path / "read-only.jpg"
+    try:
+        photo.write_bytes(b"photo")
+        read_only.write_bytes(b"read-only")
+        read_only.chmod(stat.S_IREAD)
+        _allow_exact_results(tmp_path, photo, read_only)
+        sent_to_trash = []
+        monkeypatch.setattr(main, "send2trash", sent_to_trash.append)
+        monkeypatch.setattr(main, "_recycle_bin_available", lambda path, size=0: False)
+        files = [str(photo), str(read_only)]
+
+        refused = main.delete_files(main.DeleteRequest(files=files))
+        assert refused == {"deleted": [], "errors": files, "no_recycle_bin": files}
+        assert photo.exists() and read_only.exists()
+
+        agreed = main.delete_files(main.DeleteRequest(files=files, permanent=True))
+        assert agreed == {"deleted": files, "errors": []}
+        assert not photo.exists() and not read_only.exists()
+        assert sent_to_trash == []
+    finally:
+        if read_only.exists():
+            read_only.chmod(stat.S_IWRITE)
+        _restore_scan_state(saved_state)
+
+
+def test_consent_to_delete_permanently_still_uses_the_recycle_bin_where_there_is_one(tmp_path, monkeypatch):
+    saved_state = _save_scan_state()
+    try:
+        photo = tmp_path / "photo.jpg"
+        photo.write_bytes(b"photo")
+        _allow_exact_results(tmp_path, photo)
+        sent_to_trash = []
+        monkeypatch.setattr(main, "send2trash", sent_to_trash.append)
+
+        response = main.delete_files(main.DeleteRequest(files=[str(photo)], permanent=True))
+
+        assert response == {"deleted": [str(photo)], "errors": []}
+        assert sent_to_trash == [main._resolve_path(str(photo))]
+        assert photo.exists()
+    finally:
+        _restore_scan_state(saved_state)
+
+
+def test_a_scan_reports_whether_its_folder_has_a_recycle_bin(tmp_path, monkeypatch):
+    saved_state = _save_scan_state()
+    try:
+        monkeypatch.setattr(main, "_recycle_bin_available", lambda path, size=0: False)
+        main.active_scanner = None
+        assert main.start_scan(main.ScanRequest(directory=str(tmp_path), mode="exact")) == {"status": "started"}
+        assert main.get_scan_status()["recycle_bin_available"] is False
+        deadline = time.monotonic() + 10
+        while not main.scan_state["done"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert main.scan_state["done"]
+    finally:
+        _restore_scan_state(saved_state)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows drive types and Recycle Bin settings")
+def test_recycle_bin_availability_follows_the_drive_type_and_its_settings(monkeypatch):
+    cases = [
+        # drive type, (turned off, size limit), file size, expected
+        (3, (False, None), 10, True),      # fixed drive with default settings
+        (2, (False, None), 10, False),     # removable: USB stick, memory card
+        (4, (False, None), 10, False),     # network share or mapped drive
+        (6, (False, None), 10, False),     # RAM disk
+        (3, (True, None), 10, False),      # "Don't move files to the Recycle Bin"
+        (3, (False, 1024), 1024, True),
+        (3, (False, 1024), 1025, False),   # larger than the bin
+    ]
+    monkeypatch.setattr(main, "_volume_root", lambda path: "E:\\")
+    for drive_type, settings, size, expected in cases:
+        monkeypatch.setattr(main, "_drive_type", lambda root, value=drive_type: value)
+        monkeypatch.setattr(main, "_recycle_bin_settings", lambda root, value=settings: value)
+        assert REAL_RECYCLE_BIN_AVAILABLE("E:\\photos\\a.jpg", size) is expected, (drive_type, settings, size)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows volumes")
+def test_recycle_bin_lookup_reads_this_machines_volumes(tmp_path):
+    volume_root = main._volume_root(str(tmp_path))
+    assert volume_root.upper() == os.path.splitdrive(str(tmp_path))[0].upper() + "\\"
+    assert main._drive_type(volume_root) == main._DRIVE_FIXED
+    turned_off, capacity = main._recycle_bin_settings(volume_root)
+    assert isinstance(turned_off, bool) and (capacity is None or capacity > 0)
+
+    unused_letter = next(letter for letter in reversed(string.ascii_uppercase) if not os.path.exists(f"{letter}:\\"))
+    assert REAL_RECYCLE_BIN_AVAILABLE(f"{unused_letter}:\\photos\\a.jpg") is False
 
 
 def _asgi_status(method, path, headers):

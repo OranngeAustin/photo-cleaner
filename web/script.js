@@ -3,7 +3,9 @@ let exactData = [];
 let similarData = [];
 let currentFocus = { rowIdx: -1, imgIdx: -1, tab: 'exact' };
 let scanInProgress = false;
-let pendingDeletion = null; // { tabName, rows, paths, timerId, committing, focus, request }
+let pendingDeletion = null; // { tabName, rows, paths, timerId, committing, focus, request, permanent }
+// False when the scanned folder's drive has no Recycle Bin (reported by the scan).
+let recycleBinAvailable = true;
 
 let currentDirectory = '';
 
@@ -284,11 +286,26 @@ function mergeStagedFocus(earlier, later) {
     return { previous: earlier.previous, staged: later.staged };
 }
 
+// On a drive without a Recycle Bin (USB stick, memory card, network share) a
+// delete cannot be undone once it is sent, so the user has to agree first (Q1).
+const NO_RECYCLE_BIN_WARNING = '此文件夹所在的磁盘没有回收站（例如 U 盘、存储卡或网络共享）。';
+
+function confirmPermanentDeletion(count) {
+    return window.confirm(
+        `${NO_RECYCLE_BIN_WARNING}\n\n将永久删除 ${count} 张照片，删除后无法恢复。确定继续吗？`
+    );
+}
+
 // Hide the rows and give the user three seconds to undo before the delete is
 // sent. A clean made while another is still waiting joins it, so one undo
 // restores both, instead of silently bringing the earlier rows back.
-function stageDeletion(tabName, rows, paths, toastMessage) {
+// `marked` starts the toast, e.g. "3 photos marked"; `confirmed` says the
+// caller already warned that the delete is permanent.
+function stageDeletion(tabName, rows, paths, marked, { confirmed = false } = {}) {
     if (paths.length === 0) return;
+
+    const permanent = !recycleBinAvailable;
+    if (permanent && !confirmed && !confirmPermanentDeletion(paths.length)) return;
 
     const earlier = pendingDeletion;
     if (earlier) clearTimeout(earlier.timerId);
@@ -304,9 +321,11 @@ function stageDeletion(tabName, rows, paths, toastMessage) {
         paths: allPaths,
         timerId: setTimeout(() => commitPendingDeletion(), 3000),
         committing: false,
-        focus: mergeStagedFocus(earlier?.focus, moveFocusOffHiddenRows(tabName))
+        focus: mergeStagedFocus(earlier?.focus, moveFocusOffHiddenRows(tabName)),
+        permanent
     };
-    showToast(earlier ? `${allPaths.length} photos marked; moving to Recycle Bin in 3 seconds.` : toastMessage);
+    const destination = permanent ? 'deleting permanently' : 'moving to Recycle Bin';
+    showToast(`${earlier ? `${allPaths.length} photos marked` : marked}; ${destination} in 3 seconds.`);
 }
 
 if (autoDedupBtn) {
@@ -330,7 +349,7 @@ if (autoDedupBtn) {
             'exact',
             rowsToHide,
             toDeleteAll,
-            `${toDeleteAll.length} exact duplicate photos marked; moving to Recycle Bin in 3 seconds.`
+            `${toDeleteAll.length} exact duplicate photos marked`
         );
     });
 }
@@ -358,8 +377,12 @@ if (similarAutoDedupBtn) {
         });
 
         if (toDeleteAll.length === 0) return;
+        // One dialog: on a drive without a Recycle Bin it also says the delete is permanent.
+        const permanentNote = recycleBinAvailable
+            ? ''
+            : `\n\n${NO_RECYCLE_BIN_WARNING}这些照片将被永久删除，删除后无法恢复。`;
         const confirmed = window.confirm(
-            `将删除 ${toDeleteAll.length} 张未勾选的高度相似照片。\n\n请确认您已浏览全部照片，并确认删除这些未勾选的照片？`
+            `将删除 ${toDeleteAll.length} 张未勾选的高度相似照片。${permanentNote}\n\n请确认您已浏览全部照片，并确认删除这些未勾选的照片？`
         );
         if (!confirmed) return;
 
@@ -367,7 +390,8 @@ if (similarAutoDedupBtn) {
             'similar',
             rowsToHide,
             toDeleteAll,
-            `${toDeleteAll.length} similar photos marked; moving to Recycle Bin in 3 seconds.`
+            `${toDeleteAll.length} similar photos marked`,
+            { confirmed: true }
         );
     });
 }
@@ -457,6 +481,7 @@ async function pollStatus(mode, failures = 0) {
     if (data.done) {
         setScanControls(false);
         statusBar.classList.add('hidden');
+        recycleBinAvailable = data.recycle_bin_available !== false;
         if (mode === 'exact') {
             exactData = data.results.exact || [];
             renderList(exactData, exactList, 'exact');
@@ -687,7 +712,12 @@ function commitPendingDeletion() {
     if (!deletion.committing) {
         clearTimeout(deletion.timerId);
         deletion.committing = true;
-        showToast(`Moving ${deletion.paths.length} photo(s) to the Recycle Bin\u2026`, { undoable: false });
+        showToast(
+            deletion.permanent
+                ? `Permanently deleting ${deletion.paths.length} photo(s)\u2026`
+                : `Moving ${deletion.paths.length} photo(s) to the Recycle Bin\u2026`,
+            { undoable: false }
+        );
         deletion.request = sendPendingDeletion(deletion);
     }
     return deletion.request || Promise.resolve();
@@ -698,12 +728,16 @@ async function sendPendingDeletion(deletion) {
         const response = await fetch('/api/delete', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({files: deletion.paths})
+            body: JSON.stringify({files: deletion.paths, permanent: deletion.permanent === true})
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) {
             throw new Error(data.error || `Delete request failed (${response.status})`);
         }
+        // The server found files that cannot go to the Recycle Bin (another
+        // drive, or larger than the bin): from now on, ask before each clean.
+        const noRecycleBinCount = Array.isArray(data.no_recycle_bin) ? data.no_recycle_bin.length : 0;
+        if (noRecycleBinCount > 0) recycleBinAvailable = false;
 
         const requestedPaths = new Set(deletion.paths);
         const deletedPaths = new Set(
@@ -720,7 +754,9 @@ async function sendPendingDeletion(deletion) {
         const failedCount = deletion.paths.filter(path => !deletedPaths.has(path)).length;
         if (failedCount > 0) {
             hideToastLater(showToast(
-                `\u26A0 ${failedCount} file(s) could not be deleted. They remain visible.`,
+                noRecycleBinCount > 0
+                    ? `\u26A0 ${failedCount} file(s) could not be deleted: ${noRecycleBinCount} cannot go to the Recycle Bin. Clean again to delete them permanently.`
+                    : `\u26A0 ${failedCount} file(s) could not be deleted. They remain visible.`,
                 { undoable: false }
             ));
         } else {
@@ -787,7 +823,7 @@ function triggerClean(tabName, rIdx) {
     const items = Array.from(row.querySelectorAll('.image-item'));
     const toDelete = items.filter(item => !item.classList.contains('selected')).map(item => item.dataset.path);
     
-    stageDeletion(tabName, [row], toDelete, `${toDelete.length} photos marked; moving to Recycle Bin in 3 seconds.`);
+    stageDeletion(tabName, [row], toDelete, `${toDelete.length} photos marked`);
 }
 
 // Keyboard Control
