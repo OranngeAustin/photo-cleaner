@@ -268,13 +268,9 @@ function stageBulkDeletion(tabName, rows, paths, toastMessage) {
         rows,
         paths,
         timerId: setTimeout(() => commitPendingDeletion(), 3000),
-        committing: false
+        committing: false,
+        focus: moveFocusOffHiddenRows(tabName)
     };
-
-    if (currentFocus.tab === tabName) {
-        currentFocus = { rowIdx: -1, imgIdx: -1, tab: tabName };
-        updateFocusUI();
-    }
     showToast(toastMessage);
     return true;
 }
@@ -534,6 +530,34 @@ function showLightbox(path) {
 
 // Undo & Clean Logic
 
+// Hiding the focused group must not leave the keyboard without a target: move
+// to the nearest visible group and remember where focus was, for undo.
+function moveFocusOffHiddenRows(tabName) {
+    if (currentFocus.tab !== tabName || currentFocus.rowIdx < 0) return null;
+    const focusedRow = document.getElementById(`row-${tabName}-${currentFocus.rowIdx}`);
+    if (focusedRow && focusedRow.style.display !== 'none') return null;
+
+    const previous = { ...currentFocus };
+    const rows = visibleRows(tabName);
+    const target = rows.find(row => Number(row.dataset.rowIdx) > previous.rowIdx)
+        || rows.reverse().find(row => Number(row.dataset.rowIdx) < previous.rowIdx);
+    currentFocus = target
+        ? { rowIdx: Number(target.dataset.rowIdx), imgIdx: 0, tab: tabName }
+        : { rowIdx: -1, imgIdx: -1, tab: tabName };
+    updateFocusUI();
+    return { previous, staged: { ...currentFocus } };
+}
+
+// Undo (or a failed delete) returns focus to the restored group, unless the
+// user has already moved it somewhere else.
+function restoreFocusAfterUndo(deletion) {
+    const saved = deletion.focus;
+    if (!saved || currentFocus.tab !== saved.previous.tab) return;
+    if (currentFocus.rowIdx !== saved.staged.rowIdx || currentFocus.imgIdx !== saved.staged.imgIdx) return;
+    currentFocus = { ...saved.previous };
+    updateFocusUI();
+}
+
 function restorePendingDeletion(deletion) {
     deletion.rows.forEach(row => {
         row.style.display = 'flex';
@@ -612,6 +636,8 @@ async function commitPendingDeletion() {
             removeDeletedPathsFromCachedResults(deletedPaths);
         }
         restorePendingDeletion(deletion);
+        // A re-render (above) already reset focus; otherwise the rows are back as they were.
+        if (deletedPaths.size === 0) restoreFocusAfterUndo(deletion);
 
         const failedCount = deletion.paths.filter(path => !deletedPaths.has(path)).length;
         if (failedCount > 0) {
@@ -621,6 +647,7 @@ async function commitPendingDeletion() {
         }
     } catch (error) {
         restorePendingDeletion(deletion);
+        restoreFocusAfterUndo(deletion);
         showToast('\u26A0 Delete failed. The photos remain visible and can be retried.');
     } finally {
         if (pendingDeletion === deletion) {
@@ -632,9 +659,11 @@ async function commitPendingDeletion() {
 function undoPendingDeletion() {
     if (!pendingDeletion || pendingDeletion.committing) return;
 
-    clearTimeout(pendingDeletion.timerId);
-    restorePendingDeletion(pendingDeletion);
+    const deletion = pendingDeletion;
+    clearTimeout(deletion.timerId);
+    restorePendingDeletion(deletion);
     pendingDeletion = null;
+    restoreFocusAfterUndo(deletion);
     hideToast();
 }
 
@@ -673,13 +702,9 @@ function triggerClean(tabName, rIdx) {
         rows: [row],
         paths: toDelete,
         timerId: setTimeout(() => commitPendingDeletion(), 3000),
-        committing: false
+        committing: false,
+        focus: moveFocusOffHiddenRows(tabName)
     };
-
-    if (currentFocus.tab === tabName && currentFocus.rowIdx === rIdx) {
-        currentFocus = { rowIdx: -1, imgIdx: -1, tab: tabName };
-        updateFocusUI();
-    }
     showToast(`${toDelete.length} photos marked; moving to Recycle Bin in 3 seconds.`);
 }
 

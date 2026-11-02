@@ -844,3 +844,43 @@ test('switching to a tab with fewer groups moves keyboard focus into that tab', 
     runtime.document.dispatch('keydown', { key: 'd' });
     assert.deepEqual(runtime.api.getFocus(), { rowIdx: 0, imgIdx: 1, tab: 'similar' });
 });
+
+test('staging a clean moves focus to the next group and undo brings it back', () => {
+    const runtime = createRuntime(async () => ({ ok: true, json: async () => ({}) }));
+    const rows = renderExactRowsForDelete(runtime);
+    runtime.api.setFocus('exact', 1, 0);
+
+    runtime.document.dispatch('keydown', { key: 'Delete' });
+    assert.equal(rows[1].style.display, 'none');
+    assert.deepEqual(runtime.api.getFocus(), { rowIdx: 2, imgIdx: 0, tab: 'exact' });
+
+    runtime.document.dispatch('keydown', { key: 'z', ctrlKey: true });
+    assert.deepEqual(runtime.api.getFocus(), { rowIdx: 1, imgIdx: 0, tab: 'exact' });
+});
+
+test('undo keeps a focus the user moved during the undo window', () => {
+    const runtime = createRuntime(async () => ({ ok: true, json: async () => ({}) }));
+    renderExactRowsForDelete(runtime);
+    runtime.api.setFocus('exact', 1, 0);
+    runtime.document.dispatch('keydown', { key: 'Delete' });
+
+    runtime.document.dispatch('keydown', { key: 'd' });
+    runtime.document.dispatch('keydown', { key: 'z', ctrlKey: true });
+
+    assert.deepEqual(runtime.api.getFocus(), { rowIdx: 2, imgIdx: 1, tab: 'exact' });
+});
+
+test('a failed delete of the only group gives keyboard focus back to it', async () => {
+    const runtime = createRuntime(async () => {
+        throw new Error('offline');
+    });
+    runtime.api.setExactData([['a1.jpg', 'a2.jpg']]);
+    runtime.api.renderList([['a1.jpg', 'a2.jpg']], runtime.elements.exactList, 'exact');
+    runtime.api.setFocus('exact', 0, 1);
+
+    runtime.document.dispatch('keydown', { key: 'Delete' });
+    assert.deepEqual(runtime.api.getFocus(), { rowIdx: -1, imgIdx: -1, tab: 'exact' });
+
+    await runtime.api.commitPendingDeletion();
+    assert.deepEqual(runtime.api.getFocus(), { rowIdx: 0, imgIdx: 1, tab: 'exact' });
+});
