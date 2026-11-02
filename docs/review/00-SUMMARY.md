@@ -46,7 +46,7 @@
 | [#6](https://github.com/OranngeAustin/photo-cleaner/pull/6) | `claude/perf-result-keys` → `claude/review-fixes` | 结果白名单按目录缓存 realpath |
 | [#7](https://github.com/OranngeAustin/photo-cleaner/pull/7) | `claude/perf-parallel` → `claude/review-fixes` | 并行调度改用完成队列（未达到目标，可以直接关闭） |
 
-建议的合并顺序：先在 `claude/review-fixes` 上审阅并合并 #5、#6，再决定 #7 是否合并；最后合并 #4。#4 会自动带上已经合进 `claude/review-fixes` 的内容。
+**更新**：按用户要求，#5、#6、#7 已合并进 `claude/review-fixes`；Q1 暂不处理。#4 现在已经包含这三项优化，仍处于打开状态，等待审阅后合并到 `main`。
 
 ## 三、跳过项及原因
 
@@ -71,13 +71,13 @@ RUNBOOK 中的阶段和子任务都没有跳过，但有以下几处是刻意没
 | Q3 | 扫描根目录内有指向根目录外的 junction 时，外部的结果会显示出来，但所有接口都返回 403 | 决定是跳过这类 junction，还是在界面上说明 |
 | Q4 | 缩略图缓存失效测试依赖纯色 JPEG 的大小或 mtime 发生变化，可能偶发失败 | 换成内容不同、大小也不同的图片 |
 | Q5 | 焦点为 -1 时，Space 和 Enter 没有 `preventDefault`，可能触发按钮的默认点击 | 在 WebView2 上实测 |
-| PR #7 | 收益约 9%，未达到目标 | 决定合并还是关闭 |
+| PR #7 | 收益约 9%，未达到目标 | 用户决定保留，已合并 |
 
 ## 五、建议下一步（按优先级）
 
-1. **先确认 Q1**：这是剩下唯一可能造成不可恢复数据丢失的问题。确认后再决定是加 pywin32，还是检查卷类型。
+1. **Q1（用户决定暂不处理）**：这是目前唯一可能造成不可恢复数据丢失的问题。以后处理时，再决定是加 pywin32，还是检查卷类型。
 2. **在 Windows 上打包并启动 EXE**，验证 H2；顺便手工走一遍 H3、H4 的场景。
-3. **审阅并合并 PR #5、#6，决定 #7 的去留，最后合并 #4**。
+3. **审阅 PR #4 并合并到 `main`**。#5、#6、#7 已合并进 `claude/review-fixes`。
 4. **修复 M11（DNS 重绑定）**：加 `TrustedHostMiddleware(["127.0.0.1", "localhost"])`；启动时生成随机令牌，通过 `js_api` 交给前端，后端校验每个请求；同时关闭 `/docs`（L15）。改动小，收益明确。
 5. **快速修复几个功能问题**：M2（EXIF 拍摄时间要读 Exif 子 IFD）、M3（缩略图按 EXIF 方向旋转）、M4 和 M5（切换标签或删除后键盘焦点失效）、L6（进度栏的隐藏计时器）。每项都只是几行代码加一条测试。
 6. **评估 pHash 缩小解码**：用一批真实照片对比 `draft()` 前后的分组差异。如果可以接受，相似扫描能提速一个数量级；必要时重新调阈值。

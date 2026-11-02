@@ -68,4 +68,7 @@ Pillow 12.3.0、pillow-heif 1.8.1、ImageHash 4.3.2、Send2Trash 2.1.0、pywebvi
 ## 结束状态
 
 - 推送到远端的分支：`claude/review-fixes`、`claude/perf-cluster`、`claude/perf-result-keys`、`claude/perf-parallel`。
-- 未推送 `main`，未 force push，未合并任何 PR，未删除任何远端分支。
+- RUNBOOK 执行期间：未推送 `main`，未 force push，未合并任何 PR，未删除任何远端分支。
+- 执行结束后，用户明确要求合并 #5、#6、#7（Q1 暂不处理），这三个 PR 已合并进 `claude/review-fixes`，合并方式为 merge commit：
+  #5 → `a425b7b`，#6 → `7096e77`，#7 → `c10cdb5`。合并后 Python 57 项（56 项通过，1 项为已有的失败），Node 23 项全部通过；
+  README 和 CLAUDE.md 中的测试基线同步改为 Python 57 项。#4（→ `main`）仍处于打开状态，未合并。
