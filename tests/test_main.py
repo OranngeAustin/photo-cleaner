@@ -1,5 +1,7 @@
 import os
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -192,3 +194,27 @@ def test_delete_refuses_a_symlink_that_resolves_to_a_result_file(tmp_path, monke
         assert main.is_result_path_allowed(str(target)) is True
     finally:
         _restore_scan_state(saved_state)
+
+
+def test_server_config_starts_without_console_streams():
+    """pyinstaller -w / pythonw run with sys.stdout and sys.stderr set to None."""
+    script = textwrap.dedent(
+        """
+        import sys
+        sys.stdout = None
+        sys.stderr = None
+        import uvicorn
+        import main
+        main._ensure_std_streams()
+        uvicorn.Config(main.app, host="127.0.0.1", port=0, log_level="error")
+        sys.stdout.write("ok")
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr

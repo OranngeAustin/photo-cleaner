@@ -276,6 +276,18 @@ def get_photo_info(path: str):
 app.mount("/", StaticFiles(directory=str(_resource_dir() / "web"), html=True), name="web")
 
 
+def _ensure_std_streams() -> None:
+    """Give console-less builds (pythonw, ``pyinstaller -w``) writable std streams.
+
+    Without a console, ``sys.stdout`` and ``sys.stderr`` are ``None``, and
+    uvicorn's default logging config calls ``sys.stdout.isatty()`` while it
+    builds its formatter, which aborts start-up before the window can open.
+    """
+    for stream_name in ("stdout", "stderr"):
+        if getattr(sys, stream_name) is None:
+            setattr(sys, stream_name, open(os.devnull, "w", encoding="utf-8"))
+
+
 def _server_url_when_ready(server: uvicorn.Server, timeout_seconds: float = 8.0) -> str | None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -290,6 +302,7 @@ def _server_url_when_ready(server: uvicorn.Server, timeout_seconds: float = 8.0)
 
 
 if __name__ == '__main__':
+    _ensure_std_streams()
     # Port zero asks the operating system for an unused loopback port.
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error"))
     server_thread = threading.Thread(target=server.run, daemon=True)
