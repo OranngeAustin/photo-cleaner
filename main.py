@@ -127,11 +127,29 @@ def _read_capture_time(path: str) -> str | None:
 
 
 def _collect_result_path_keys(results: dict, mode: str) -> set[str]:
-    return {
-        _path_key(path)
-        for group in results.get(mode, [])
-        for path in group
-    }
+    """Return ``_path_key`` for every result path, resolving each directory once.
+
+    For a path whose last component is not a symlink,
+    ``realpath(dir/name) == realpath(dir)/name``.  Results share a small set of
+    directories, so caching the directory resolution replaces one realpath per
+    file (several lstat calls, or a handle open on Windows) with one per folder.
+    """
+    # Maps a directory to its resolved path, ending in a separator.
+    resolved_prefixes: dict[str, str] = {}
+    keys: set[str] = set()
+    for group in results.get(mode, []):
+        for path in group:
+            absolute_path = os.path.abspath(path)
+            directory, name = os.path.split(absolute_path)
+            if not name or os.path.islink(absolute_path):
+                keys.add(_path_key(path))
+                continue
+            prefix = resolved_prefixes.get(directory)
+            if prefix is None:
+                prefix = os.path.join(os.path.realpath(directory), "")
+                resolved_prefixes[directory] = prefix
+            keys.add(os.path.normcase(prefix + name))
+    return keys
 
 
 @app.post("/api/scan")
