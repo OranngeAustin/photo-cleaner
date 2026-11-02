@@ -8,13 +8,14 @@ from bisect import bisect_right
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import lru_cache
-from typing import Callable, Dict, Iterator
+from typing import Callable, Dict, Iterator, TypeVar
 
 import imagehash
 from PIL import Image
 
 
 logger = logging.getLogger(__name__)
+ResultT = TypeVar("ResultT")
 
 try:
     from pillow_heif import register_heif_opener
@@ -66,23 +67,39 @@ def get_file_hash(filepath: str, cancel_event: threading.Event | None = None) ->
         return ""
 
 
+def get_file_prefix_hash_and_size(
+    filepath: str,
+    cancel_event: threading.Event | None = None,
+    prefix_size: int = PREFIX_HASH_SIZE,
+) -> tuple[str, int] | None:
+    """Hash a file prefix and return it with the file size seen by that read.
+
+    The size comes from ``fstat`` on the same handle, after the read.  If the
+    file grew or shrank since it was enumerated (a copy or sync in progress),
+    the caller sees a size that differs from the enumerated one.
+    """
+    try:
+        if _was_cancelled(cancel_event):
+            return None
+        with open(filepath, 'rb') as file_obj:
+            prefix = file_obj.read(prefix_size)
+            current_size = os.fstat(file_obj.fileno()).st_size
+        if _was_cancelled(cancel_event):
+            return None
+        return hashlib.sha256(prefix).hexdigest(), current_size
+    except OSError:
+        logger.warning("Failed to hash file prefix: %s", filepath, exc_info=True)
+        return None
+
+
 def get_file_prefix_hash(
     filepath: str,
     cancel_event: threading.Event | None = None,
     prefix_size: int = PREFIX_HASH_SIZE,
 ) -> str:
     """Hash only a file prefix for the exact-match prefilter."""
-    try:
-        if _was_cancelled(cancel_event):
-            return ""
-        with open(filepath, 'rb') as file_obj:
-            prefix = file_obj.read(prefix_size)
-        if _was_cancelled(cancel_event):
-            return ""
-        return hashlib.sha256(prefix).hexdigest()
-    except OSError:
-        logger.warning("Failed to hash file prefix: %s", filepath, exc_info=True)
-        return ""
+    result = get_file_prefix_hash_and_size(filepath, cancel_event, prefix_size)
+    return result[0] if result else ""
 
 
 def get_image_phash(filepath: str, cancel_event: threading.Event | None = None) -> str:
@@ -263,9 +280,13 @@ class Scanner:
     def _iter_parallel_results(
         self,
         filepaths: list[str],
-        worker: Callable[[str, threading.Event], str],
-    ) -> Iterator[tuple[str, str]]:
-        """Process a bounded number of futures so cancellation is prompt."""
+        worker: Callable[[str, threading.Event], ResultT],
+    ) -> Iterator[tuple[str, ResultT | str]]:
+        """Process a bounded number of futures so cancellation is prompt.
+
+        A worker that raises is logged and reported as ``""``, so callers
+        skip any falsy result.
+        """
         if not filepaths:
             return
 
@@ -461,12 +482,18 @@ class Scanner:
 
         callback('status', {'message': f'Filtering {len(files_to_filter)} same-size files by prefix hash...'})
         prefix_groups: dict[tuple[int, str], list[str]] = defaultdict(list)
-        for completed, (filepath, prefix_hash) in enumerate(
-            self._iter_parallel_results(files_to_filter, get_file_prefix_hash), start=1
+        # Files whose size changed after enumeration: a prefix match alone
+        # proves nothing about them, even if they were small when listed.
+        resized_files: set[str] = set()
+        for completed, (filepath, prefix_result) in enumerate(
+            self._iter_parallel_results(files_to_filter, get_file_prefix_hash_and_size), start=1
         ):
             if self.cancel_requested:
                 return []
-            if prefix_hash:
+            if prefix_result:
+                prefix_hash, current_size = prefix_result
+                if current_size != file_sizes[filepath]:
+                    resized_files.add(filepath)
                 prefix_groups[(file_sizes[filepath], prefix_hash)].append(filepath)
             if completed % 100 == 0:
                 callback('progress', {'current': completed, 'total': len(files_to_filter), 'phase': 'prefix_filter'})
@@ -477,7 +504,7 @@ class Scanner:
             if len(paths) < 2:
                 continue
             paths.sort(key=os.path.normcase)
-            if file_size <= PREFIX_HASH_SIZE:
+            if file_size <= PREFIX_HASH_SIZE and resized_files.isdisjoint(paths):
                 exact_results.append(paths)
             else:
                 files_to_hash.extend(paths)

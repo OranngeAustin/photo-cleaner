@@ -440,3 +440,21 @@ def test_cluster_cancelled_from_progress_keeps_only_completed_anchor_groups():
         phash_dict, cancel_event=cancel_event, progress_callback=cancel_at_second_report
     )
     assert result == _reference_anchor_clusters(phash_dict, 5, cancel_at=100)
+
+
+def test_exact_scan_full_hashes_small_files_that_grew_after_enumeration(tmp_path):
+    # M1: sizes come from enumeration. A copy still being written can be past
+    # 64 KiB by the time its prefix is read, and then the prefix no longer
+    # covers the whole file, so it must not decide the match on its own.
+    shared_prefix = os.urandom(scanner_module.PREFIX_HASH_SIZE + 4_000)
+    first = tmp_path / "first.jpg"
+    second = tmp_path / "second.jpg"
+    copy = tmp_path / "copy.jpg"
+    first.write_bytes(shared_prefix + b"first tail")
+    second.write_bytes(shared_prefix + b"other tail")
+    copy.write_bytes(shared_prefix + b"first tail")
+    stale_sizes = {str(path): 1_000 for path in (first, second, copy)}
+
+    groups = Scanner(max_workers=2)._scan_exact(sorted(stale_sizes), stale_sizes, lambda *_: None)
+
+    assert groups == [[str(copy), str(first)]]
