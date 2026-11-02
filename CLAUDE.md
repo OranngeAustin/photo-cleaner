@@ -1,0 +1,38 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project
+
+Photo Cleaner: a Windows desktop duplicate-photo cleaner. A FastAPI backend serves a vanilla-JS web UI, and `pywebview` wraps it in a native window. The README and the UI strings are in Chinese.
+
+## Commands
+
+```bash
+pip install -r requirements.txt pytest   # pytest is not in requirements.txt
+python main.py                           # launches the server on a random loopback port, then the pywebview window
+python -m pytest -q                      # backend tests (tests/test_main.py, tests/test_scanner.py)
+python -m pytest tests/test_scanner.py::test_scanner_exact_mode -q   # single Python test
+node --test tests/test_frontend.js       # frontend tests (Node built-in runner, no npm deps)
+node --test --test-name-pattern "partial delete" tests/test_frontend.js   # single frontend test
+pyinstaller -F -w --name PhotoCleaner --add-data "web;web" main.py      # single-file EXE
+```
+
+There is no linter or build step configured. `tests/test_main.py` imports `main`, which imports `webview`, so `pywebview` must be installed even to run the backend tests. `Start_PhotoCleaner.bat` hard-codes a local conda Python path and is specific to the author's machine.
+
+## Architecture
+
+**`main.py`: FastAPI app and security boundary.** It holds global, lock-protected state: `scan_state` (polled by the frontend), `active_scanner` (only one scan at a time; a second request gets a 409), `allowed_scan_root`, and `allowed_result_paths_by_mode` (`{"exact": set, "similar": set}` of normcased real paths). Every file-touching endpoint (`/api/thumbnail`, `/api/image`, `/api/photo_info`, `/api/delete`) must pass `is_result_path_allowed`: the path has to be inside the scan root *and* in one of the cached result sets. The result sets for both modes survive a rescan of the same root, so switching tabs keeps previews working; both are cleared when the root changes. Deleting a file removes it from both sets. Deletion goes through `send2trash` (the Recycle Bin), never a permanent delete. Static files are mounted last at `/` from `_resource_dir() / "web"`, which resolves to PyInstaller's `_MEIPASS` when frozen, so keep that path logic intact.
+
+**`backend/scanner.py`: scan engine.** Create a new `Scanner` for each scan job. `scan_directory` runs on a daemon thread and reports through `callback(event_type, data)` with the events `status`, `progress` and `done`. `done` always fires, including on cancel or error, and the payload carries `exact`, `similar`, `cancelled`, `skipped_files` and possibly `error` or `empty_scan`. The `main.py` callback ignores events from a scanner that is no longer active.
+- Exact mode is a funnel: group by size (sizes come from `DirEntry.stat()` during enumeration), then a 64 KiB prefix SHA-256, then a full SHA-256 only for files larger than the prefix. Files of 64 KiB or less are treated as decided after the prefix step.
+- Similar mode uses pHash plus `cluster_similar_hashes`. A six-segment (11/11/11/11/10/10-bit) index acts as a lossless prefilter for a Hamming threshold of 5 or less (pigeonhole principle), and every candidate is still checked exactly. Clusters are **anchor-based and non-transitive**: each member is within the threshold of the group's first hash. This is intentional, so don't "fix" it into union-find. If `SIMILARITY_THRESHOLD` ever reaches 6 or more, the index no longer guarantees completeness and the code falls back to a full scan.
+- `_iter_parallel_results` caps in-flight futures at 2× the worker count so cancellation takes effect quickly. Hash functions check `cancel_event` between chunks and return `""` on failure or cancel. Callers treat `""` as "skip".
+- Thumbnails come from an `lru_cache` keyed on `(realpath, size, mtime_ns, file_size)`. `clear_thumbnail_cache()` is called on each new scan and after deletions. Transparent images are composited onto white before JPEG encoding.
+- Paths longer than 259 characters are skipped (Windows MAX_PATH). Symlinked directories are not followed, and directories already visited by real path are skipped.
+
+**`web/script.js`: UI state machine (no framework).** Globals: `exactData` and `similarData` (arrays of path groups), `currentFocus`, and `pendingDeletion` (`{type, tabName, rows, paths, timerId, committing}`). Deletion is optimistic. Rows are hidden, then a 3-second toast lets Ctrl+Z undo, and only after that does `commitPendingDeletion` POST `/api/delete`. Only paths the server returns in `deleted` are removed, from *both* cached tabs (`removeDeletedPathsFromCachedResults`). Everything else is restored, along with the user's selections, matched by path. Groups left with fewer than 2 photos are dropped. Similar-tab bulk delete removes only *unchecked* photos, asks first with `window.confirm`, and folds an existing similar-tab undo window into the new batch. While a commit is in flight, new clean actions are blocked. Scan progress comes from polling `/api/scan_status` until `done`. The folder picker calls `window.pywebview.api.choose_directory()` (the `Api` class in `main.py`).
+
+**Frontend tests** (`tests/test_frontend.js`) run `web/script.js` inside a `vm` context with a hand-written fake DOM (`Element`, `ClassList`, a minimal selector matcher) and mocked `fetch`, `setTimeout` and `window.confirm`. A shim appended to the source exposes internals as `globalThis.__frontendTest`. When you add a function or state that a test needs, add it to that export list. When `script.js` starts using a new DOM API, element ID or global at load time, extend the fake DOM and the context globals too, or every frontend test breaks.
+
+README states a regression baseline (19 Python and 19 Node tests); update it when you add tests.
