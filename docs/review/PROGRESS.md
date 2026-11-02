@@ -88,9 +88,9 @@ Pillow 12.3.0、pillow-heif 1.8.1、ImageHash 4.3.2、Send2Trash 2.1.0、pywebvi
 | 1 | 架构摸底（增量复核 `01-architecture.md`） | ✅ 完成 | 合并 #5–#7 后模块划分、入口、数据流都没变；文档里没有失效的行号引用（只引用到函数级）。本轮新增的防护（Host/Origin 校验、删除前比对文件指纹、解码像素预算）在阶段 4 完成后补进架构文档 |
 | 2 | 代码审查：在当前代码上复核 M1–M11 | ✅ 完成 | 11 项全部仍然存在。用脚本复现了 5 项：M1（大小过期的两个不同文件被判为重复）、M2（显示 2030 而不是 2024）、M3（缩略图 256×128）、M8（替换过内容的文件照样被删）、M11（`Host: attacker.example` 返回 200）。M7 没有任何像素量 / 并发保护（worker 8 个，`MAX_IMAGE_PIXELS` 为默认值）。M9 是基线里那条失败的测试。M4–M6 会在阶段 4 先写测试，确认测试在修复前失败 |
 | 3 | 安全审计：复核 M11，重跑 pip-audit | ✅ 完成 | M11 已复现（伪造 Host/Origin 的 POST 返回 200）。`pip-audit 2.10.1 -r requirements.txt`：No known vulnerabilities found。本轮没有新增依赖 |
-| 4 | 修复 M1–M11（每项 1 个 commit + 测试）+ PR → `claude/review-fixes` | 🔄 进行中 | 已完成 M1–M6，明细见下表 |
-| 5 | 性能分析：修复前后基准对比 | ⏳ 待做 | |
-| 6 | 算法优化 | ⏳ 待做 | |
+| 4 | 修复 M1–M11（每项 1 个 commit + 测试）+ PR → `claude/review-fixes` | ✅ 完成 | 11 项全部修复（M10 为补测试），[PR #8](https://github.com/OranngeAustin/photo-cleaner/pull/8) → `claude/review-fixes`（未合并）；Python 86✓/1 skip/0✗，Node 32✓ |
+| 5 | 性能分析：修复前后基准对比 | ✅ 完成 | 新旧代码交错 A/B（3 轮 × 5 次）：只有 `exact` 有真实回归（+6.5%，来自 M1 每个文件多一次 `fstat`），其余在噪声内；M8 新增每个结果文件一次 stat（约 1.35 µs/个）。见 `03-perf-plan.md`「第二轮」 |
+| 6 | 算法优化 | ✅ 完成 | 只有 1 项：消除 M1 的回归。先提交特征测试 `55257c8`，再提交修改 `ba8fc9b`（`fstat` → 多读 1 字节），1133 → 1081 ms，与修复前的 1064 ms 差在噪声内。直接提交在 `claude/medium-fixes` 上（R2-D10）；第一轮其余候选的结论不变 |
 | 7 | 总结：更新 `00-SUMMARY.md` | ⏳ 待做 | |
 
 ### 第二轮基线（`claude/medium-fixes` @ `4db7895`）
@@ -128,9 +128,10 @@ Pillow 12.3.0、pillow-heif 1.8.1、ImageHash 4.3.2、Send2Trash 2.1.0、pywebvi
 | M9 | `2125ded` | 原测试的平台检查补上 `OSError`，在 Linux 上跳过，并新增「只枚举一次」的断言；新增可移植的目录符号链接环测试 | 1（另有 1 条加强了断言） |
 | M10 | `2d48fea` | 只补测试：Python 3 条、前端 3 条；变异检查确认它们能抓到问题 | 6 |
 | M11 | `97c7200` | `LocalRequestGuard` 校验 Host 和 Origin；用真实 Chromium 做了端到端验证 | 10（参数化） |
-| 文档 | `cd7c1cf` | README、CLAUDE.md：测试基线改为 Python 81 项（非 Windows 上跳过 1 项）、Node 32 项，并补充行为说明 | — |
+| 文档 | `cd7c1cf`、`b916739` | README、CLAUDE.md：测试基线改为 Python 87 项（非 Windows 上跳过 1 项）、Node 32 项，并补充行为说明 | — |
+| 阶段 6 | `55257c8`、`ba8fc9b` | 先提交前缀哈希的特征测试，再把 M1 的检测方式由 `fstat` 改为多读 1 字节 | 3 + 3（参数化） |
 
-阶段 4 结束时的测试结果：**Python 80 passed、1 skipped、0 failed；Node 32 passed、0 failed**。基线是 Python 56 项通过、1 项失败，Node 23 项通过；失败数从 1 降到 0。
+阶段 4 结束时的测试结果：**Python 80 passed、1 skipped、0 failed；Node 32 passed、0 failed**。阶段 6 结束后：Python 86 passed、1 skipped、0 failed；Node 32 passed。基线是 Python 56 项通过、1 项失败，Node 23 项通过；失败数从 1 降到 0。
 
 - **R2-D6 M11 不采用会话令牌**：Host 和 Origin 校验已经能挡住所有由浏览器发起的攻击，包括 DNS 重绑定和跨站 POST。
   令牌只能额外防住本机其他进程，而本机进程本来就能以同一用户的身份直接读写这些照片，不在威胁模型内。
@@ -150,3 +151,10 @@ Pillow 12.3.0、pillow-heif 1.8.1、ImageHash 4.3.2、Send2Trash 2.1.0、pywebvi
 - **R2-D4 M4 不记忆每个标签各自的焦点**：切回标签时一律从第一个可见组开始。
   记忆焦点还要处理另一个标签删除后行号重新编号的问题，复杂度不值得。
 - **R2-D5 M5 部分删除成功后的焦点不动**：列表重新渲染后焦点回到第 0 组，这是原有行为（L8），不在本次范围内。
+- **R2-D10 阶段 6 的处理方式**：第二轮阶段 5 发现的唯一热点，是本轮 M1 修复自己引入的回归，而且只存在于尚未合并的 `claude/medium-fixes` 上。
+  如果按 RUNBOOK 另开 `claude/perf-*` 分支，再建一个 PR 指向 PR 分支，合并顺序会变得复杂，所以直接提交在 `claude/medium-fixes` 上，随 PR #8 一起审阅。
+  RUNBOOK 的其他步骤都照做了：先单独提交特征测试；每项 5 次取中位数，并与旧代码交错对比；修改后清理。
+  这是「消除回归」，不是「优化」，所以不套用「提升 20% / 不足 5% 回退」的标准，衡量标准是不慢于修复前（+1.6%，在噪声内）。
+  第一轮剩下的性能候选（pHash 缩小解码、删除后不清缩略图缓存等）结论不变，本轮不做。
+- **R2-D11 真实浏览器验证**：前端单元测试用的是假 DOM，所以另外用 Chromium（WebView2 的内核）配合真实后端，跑了 M4–M6 和 M11 的端到端脚本，结果见 PR #8。
+  脚本放在会话的 scratchpad 里，没有提交到仓库（仓库没有 e2e 基础设施，新增会引入 Playwright 依赖）。
