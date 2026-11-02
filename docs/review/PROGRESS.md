@@ -91,7 +91,7 @@ Pillow 12.3.0、pillow-heif 1.8.1、ImageHash 4.3.2、Send2Trash 2.1.0、pywebvi
 | 4 | 修复 M1–M11（每项 1 个 commit + 测试）+ PR → `claude/review-fixes` | ✅ 完成 | 11 项全部修复（M10 为补测试），[PR #8](https://github.com/OranngeAustin/photo-cleaner/pull/8) → `claude/review-fixes`（未合并）；Python 86✓/1 skip/0✗，Node 32✓ |
 | 5 | 性能分析：修复前后基准对比 | ✅ 完成 | 新旧代码交错 A/B（3 轮 × 5 次）：只有 `exact` 有真实回归（+6.5%，来自 M1 每个文件多一次 `fstat`），其余在噪声内；M8 新增每个结果文件一次 stat（约 1.35 µs/个）。见 `03-perf-plan.md`「第二轮」 |
 | 6 | 算法优化 | ✅ 完成 | 只有 1 项：消除 M1 的回归。先提交特征测试 `55257c8`，再提交修改 `ba8fc9b`（`fstat` → 多读 1 字节），1133 → 1081 ms，与修复前的 1064 ms 差在噪声内。直接提交在 `claude/medium-fixes` 上（R2-D10）；第一轮其余候选的结论不变 |
-| 7 | 总结：更新 `00-SUMMARY.md` | ⏳ 待做 | |
+| 7 | 总结：更新 `00-SUMMARY.md` | ✅ 完成 | `00-SUMMARY.md` 文首新增「第二轮」一节，同步更新了 PR 列表、跳过项、待人工确认和下一步 |
 
 ### 第二轮基线（`claude/medium-fixes` @ `4db7895`）
 
@@ -158,3 +158,9 @@ Pillow 12.3.0、pillow-heif 1.8.1、ImageHash 4.3.2、Send2Trash 2.1.0、pywebvi
   第一轮剩下的性能候选（pHash 缩小解码、删除后不清缩略图缓存等）结论不变，本轮不做。
 - **R2-D11 真实浏览器验证**：前端单元测试用的是假 DOM，所以另外用 Chromium（WebView2 的内核）配合真实后端，跑了 M4–M6 和 M11 的端到端脚本，结果见 PR #8。
   脚本放在会话的 scratchpad 里，没有提交到仓库（仓库没有 e2e 基础设施，新增会引入 Playwright 依赖）。
+
+### 第二轮结束状态
+
+- 推送到远端的分支：`claude/medium-fixes`（代码和测试）、`claude/review-fixes`（审查文档）。
+- 新建 [PR #8](https://github.com/OranngeAustin/photo-cleaner/pull/8)：`claude/medium-fixes` → `claude/review-fixes`，未合并。
+- 未推送 `main`，未 force push，未合并任何 PR，未删除任何分支。本地的临时 worktree（用于 A/B 对比和文档提交）不是分支，用完即清理。

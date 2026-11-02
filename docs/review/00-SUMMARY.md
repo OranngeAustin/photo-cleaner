@@ -1,7 +1,53 @@
 # 00 · 审查与优化总结
 
-按 [RUNBOOK.md](RUNBOOK.md) 执行了阶段 0 到阶段 7，全部完成，没有跳过任何阶段。审查基准是 `main` @ `c8a8e5c`。
-逐步记录和决策见 [PROGRESS.md](PROGRESS.md)。全程没有推送 `main`，没有 force push，没有合并任何 PR，也没有删除远端分支。
+本文件记录两轮工作，逐步记录和决策都在 [PROGRESS.md](PROGRESS.md)：
+
+- **第二轮（最新）**：修复中风险问题 M1–M11。代码在 `claude/medium-fixes`，[PR #8](https://github.com/OranngeAustin/photo-cleaner/pull/8) → `claude/review-fixes`（未合并）。见下一节。
+- **第一轮**：按 [RUNBOOK.md](RUNBOOK.md) 完成阶段 0–7，包括审查、H1–H4 修复和 3 项性能优化，审查基准是 `main` @ `c8a8e5c`。见「一」到「五」。
+
+两轮执行期间都没有推送 `main`、没有 force push、没有合并任何 PR、没有删除远端分支。第一轮结束后，#5–#7 是按用户的明确要求合并的。
+
+## 第二轮：修复中风险问题 M1–M11
+
+| 阶段 | 结果 |
+|---|---|
+| 0 准备 | 从 `claude/review-fixes` @ `4db7895` 创建 `claude/medium-fixes`。基线：Python 56 项通过、1 项失败，Node 23 项通过 |
+| 1 架构 | 复核后没有失效内容；本轮新增的防护补进了 01-architecture |
+| 2 审查 | 11 项在当前代码上全部仍然存在，其中 M1、M2、M3、M8、M11 用脚本复现 |
+| 3 安全 | M11 已复现（伪造 Host 和 Origin 的请求返回 200）；pip-audit 无已知漏洞 |
+| 4 修复 | 11 项全部完成，每项 1 个 commit，附测试，且测试都确认过修复前失败、修复后通过 → [PR #8](https://github.com/OranngeAustin/photo-cleaner/pull/8) |
+| 5 性能 | 新旧代码交错 A/B：只有 `exact` 有真实回归（+6.5%，来自 M1 新增的 `fstat`），其余都在噪声内 |
+| 6 优化 | 消除这项回归：改为多读 1 个字节代替 `fstat`，最终只比修复前慢 1.6%，在噪声范围内（先单独提交了特征测试） |
+| 7 总结 | 本节 |
+
+**测试**：Python 从「56 项通过、1 项失败」变为「**86 项通过、1 项跳过、0 项失败**」，跳过的是 Windows 联接点测试；Node 从 23 项增加到 **32 项**，全部通过。
+另外用真实 Chromium（WebView2 的内核）验证了 M11 的拦截效果，以及 M4–M6 的键盘和删除流程。
+
+| 编号 | 问题 → 修复 |
+|---|---|
+| M1 | 文件在枚举后被写长时，可能被误判为重复 → 读前缀时检测大小变化，变化的组改走全量哈希 |
+| M2 | 「拍摄时间」显示的其实是修改时间 → 先读 Exif 子 IFD |
+| M3 | 竖拍照片的缩略图是横的 → 按 EXIF Orientation 只旋转已经缩小的缩略图 |
+| M4 / M5 | 切换标签、暂存删除后键盘失效 → 焦点总有有效目标，撤销或删除失败后焦点复原 |
+| M6 | 删除和扫描交错进行 → 切标签自动扫描、换目录之前，先等删除提交完成 |
+| M7 | 大图并发解码可能 OOM → 解码像素预算（1.92 亿像素），缩略图先缩小再合成白底 |
+| M8 | 扫描后被替换过的文件照样被删 → 扫描结束时记录 `(size, mtime_ns)`，删除前比对 |
+| M9 | 符号链接环测试在非 Windows 上必然失败 → 非 Windows 上跳过，加强断言，并新增可移植的版本 |
+| M10 | 高风险路径缺少测试 → 补 6 条，并做了变异检查 |
+| M11 | DNS 重绑定 → `LocalRequestGuard` 校验 Host 和 Origin。**L14 一并解决**；L1 随 M8 得到缓解 |
+
+**本轮的主要取舍**（详见 PROGRESS R2-D1～R2-D11）：
+- PR 指向 `claude/review-fixes`，不指向 `main`。
+- M6 选择「先提交」而不是「撤销」。
+- M11 没有加会话令牌，也没有限制 `/api/scan` 可扫描的目录，因为这两项都要改前后端接口。
+- M8 遇到缺少指纹的白名单路径时放行，这种情况只会出现在测试中。
+- M9 修改了已有测试：只改了平台检查并新增断言，原有断言一条没改。
+- 阶段 6 的回归修复直接提交在 PR #8 中，没有另开 perf 分支。
+
+**本轮没有做的**：
+- 低风险问题中，除了 L14（已解决）和 L1（已缓解），其余都没有处理。
+- Q1 按用户的决定暂不处理。
+- 端到端浏览器脚本没有提交到仓库（仓库没有 e2e 基础设施）。
 
 ## 一、完成了什么
 
@@ -44,7 +90,8 @@
 | [#4](https://github.com/OranngeAustin/photo-cleaner/pull/4) | `claude/review-fixes` → `main` | 审查文档、H1–H4 修复、基准脚本，以及测试基线文档的更新 |
 | [#5](https://github.com/OranngeAustin/photo-cleaner/pull/5) | `claude/perf-cluster` → `claude/review-fixes` | 相似聚类提速 |
 | [#6](https://github.com/OranngeAustin/photo-cleaner/pull/6) | `claude/perf-result-keys` → `claude/review-fixes` | 结果白名单按目录缓存 realpath |
-| [#7](https://github.com/OranngeAustin/photo-cleaner/pull/7) | `claude/perf-parallel` → `claude/review-fixes` | 并行调度改用完成队列（未达到目标，可以直接关闭） |
+| [#7](https://github.com/OranngeAustin/photo-cleaner/pull/7) | `claude/perf-parallel` → `claude/review-fixes` | 并行调度改用完成队列（未达到目标；用户决定保留，已合并） |
+| [#8](https://github.com/OranngeAustin/photo-cleaner/pull/8) | `claude/medium-fixes` → `claude/review-fixes` | **第二轮**：修复 M1–M11，附测试；未合并 |
 
 **更新**：按用户要求，#5、#6、#7 已合并进 `claude/review-fixes`；Q1 暂不处理。#4 现在已经包含这三项优化，仍处于打开状态，等待审阅后合并到 `main`。
 
@@ -54,9 +101,9 @@ RUNBOOK 中的阶段和子任务都没有跳过，但有以下几处是刻意没
 
 | 项目 | 原因 |
 |---|---|
-| 中、低级别问题（M1–M11、L1–L15） | 阶段 4 按规则只修「高」级别且有把握的问题 |
+| 中、低级别问题（M1–M11、L1–L15） | 第一轮阶段 4 按规则只修「高」级别。**M1–M11 已在第二轮修复（PR #8）**；低级别问题中，L14 已解决，L1 已缓解，其余仍未处理 |
 | Q1：在没有回收站的磁盘上可能被永久删除（建议定级为高） | 在 Linux 容器里无法验证 Windows 回收站的行为；修复需要 Windows 专用代码，或者新增 pywin32 依赖 |
-| 既有失败测试 `test_scan_directory_symlink_cycle` | RUNBOOK 规定「已有的失败测试只记录、不修」 |
+| 既有失败测试 `test_scan_directory_symlink_cycle` | 第一轮按 RUNBOOK 只记录、不修；第二轮作为 M9 修复，在非 Windows 上改为跳过 |
 | 性能第 4 项：pHash 用 JPEG `draft()` 缩小解码（单张约快 25×） | 会改变 pHash 数值，进而改变分组结果，无法用特征测试固定行为，属于产品决策 |
 | 性能第 5–8 项 | 收益不确定、收益太小，或者无法在容器里可靠测量（见 03-perf-plan） |
 | 阶段 6 第 3 项没有达到 20% | 3 种方案都没有达到，热缓存下的瓶颈是线程 / GIL 争用；保留了 −9% 的版本，未回退 |
@@ -72,14 +119,28 @@ RUNBOOK 中的阶段和子任务都没有跳过，但有以下几处是刻意没
 | Q4 | 缩略图缓存失效测试依赖纯色 JPEG 的大小或 mtime 发生变化，可能偶发失败 | 换成内容不同、大小也不同的图片 |
 | Q5 | 焦点为 -1 时，Space 和 Enter 没有 `preventDefault`，可能触发按钮的默认点击 | 在 WebView2 上实测 |
 | PR #7 | 收益约 9%，未达到目标 | 用户决定保留，已合并 |
+| 第二轮 · M11 | 在 Chromium 中实测过：应用页面同源 POST 带的 `Origin` 与 `http://<Host>` 一致，所以能通过校验 | 在 Windows 打包版（WebView2）中走一遍扫描和删除。如果出现 403，看日志中的 `Rejected request with Host … Origin …` |
+| 第二轮 · M3 | 用合成的 JPEG 和 HEIC 验证过 | 用手机竖拍的真实照片（JPEG 和 HEIC）看一下缩略图方向 |
+| 第二轮 · M7 | 预算 1.92 亿像素（约 0.8 GB）是估算值 | 扫描含全景图或大 TIFF 的目录，观察内存峰值和速度，必要时调整 `DECODE_PIXEL_BUDGET` |
+| 第二轮 · M8 | Linux 上每个文件约 1.35 µs；Windows 的 `os.stat` 慢得多 | 在结果很多（上万张）的目录上，看扫描结束阶段是否明显变慢。如果变慢，可以改用枚举阶段 `DirEntry.stat()` 的数据（见 03-perf-plan「第二轮」） |
+| 第二轮 · M6 | 切标签或换目录时，会提前提交暂存的删除 | 确认这个交互符合预期（另一个选择是撤销） |
 
 ## 五、建议下一步（按优先级）
 
-1. **Q1（用户决定暂不处理）**：这是目前唯一可能造成不可恢复数据丢失的问题。以后处理时，再决定是加 pywin32，还是检查卷类型。
-2. **在 Windows 上打包并启动 EXE**，验证 H2；顺便手工走一遍 H3、H4 的场景。
-3. **审阅 PR #4 并合并到 `main`**。#5、#6、#7 已合并进 `claude/review-fixes`。
-4. **修复 M11（DNS 重绑定）**：加 `TrustedHostMiddleware(["127.0.0.1", "localhost"])`；启动时生成随机令牌，通过 `js_api` 交给前端，后端校验每个请求；同时关闭 `/docs`（L15）。改动小，收益明确。
-5. **快速修复几个功能问题**：M2（EXIF 拍摄时间要读 Exif 子 IFD）、M3（缩略图按 EXIF 方向旋转）、M4 和 M5（切换标签或删除后键盘焦点失效）、L6（进度栏的隐藏计时器）。每项都只是几行代码加一条测试。
-6. **评估 pHash 缩小解码**：用一批真实照片对比 `draft()` 前后的分组差异。如果可以接受，相似扫描能提速一个数量级；必要时重新调阈值。
-7. **工程化**：锁定依赖版本（L13）；加 CI，跑 pytest、node 测试和 pip-audit；把 `test_scan_directory_symlink_cycle` 改成跨平台写法（用 `os.symlink`，或在非 Windows 上 skip），并断言每个文件只枚举一次。
-8. **补测试覆盖**（M10）：64 KiB 边界、哈希中途取消、`done` 回调抛异常、「全部去重」的正向路径、3 秒计时器到期自动提交。
+1. **审阅 [PR #8](https://github.com/OranngeAustin/photo-cleaner/pull/8)，合并到 `claude/review-fixes`；然后审阅 [PR #4](https://github.com/OranngeAustin/photo-cleaner/pull/4)，合并到 `main`。**
+   #4 会自动带上 #5–#8 的全部内容。
+2. **在 Windows 上打包，启动 EXE**：验证 H2；顺便手动走一遍「待人工确认」里第二轮的 5 项（M11、M3、M7、M8、M6）。
+3. **Q1（用户决定暂不处理）**：这是目前唯一可能造成不可恢复数据丢失的问题。以后处理时，再决定是加 pywin32，还是检查卷类型。
+4. **低风险问题中值得顺手修的几项**：
+   - L3：`done` 回调第二次抛异常时，`active_scanner` 不会复位，之后所有扫描都返回 409。
+   - L6：进度栏的隐藏计时器。
+   - L7：轮询失败一次就解锁界面。
+   - L10：Toast 的状态不对。
+   - L2：失败的缩略图也会被缓存。
+
+   每项都只是几行代码加一条测试。L15（关闭 `/docs`）在 M11 之后已经没有实际风险，可以顺手做。
+5. **评估 pHash 缩小解码**：用一批真实照片对比 `draft()` 前后的分组差异。如果可以接受，相似扫描能提速一个数量级；必要时重新调整阈值。
+6. **工程化**：
+   - 锁定依赖版本（L13）；
+   - 加 CI，跑 pytest、node 测试和 pip-audit；
+   - 如果需要，把 scratchpad 里的 Chromium 端到端脚本整理进仓库，作为可选测试。
