@@ -275,6 +275,7 @@ function createRuntime(fetchImpl, confirmImpl = () => true) {
     document.getElementById('tab-similar').appendChild(elements.similarList);
 
     const scheduledDelays = [];
+    const scheduledCallbacks = [];
     const window = {
         addEventListener() {},
         confirm: confirmImpl,
@@ -289,8 +290,9 @@ function createRuntime(fetchImpl, confirmImpl = () => true) {
         encodeURIComponent,
         fetch: fetchImpl,
         globalThis: {},
-        setTimeout: (_, delay) => {
+        setTimeout: (callback, delay) => {
             scheduledDelays.push(delay);
+            scheduledCallbacks.push({ callback, delay });
             return { mocked: true };
         },
         clearTimeout() {},
@@ -312,7 +314,7 @@ globalThis.__frontendTest = {
     setSimilarData: value => { similarData = value; },
     snapshot: () => JSON.parse(JSON.stringify({ exactData, similarData })),
 };`, context, { filename: 'script.js' });
-    return { api: context.globalThis.__frontendTest, document, elements, scheduledDelays, window };
+    return { api: context.globalThis.__frontendTest, document, elements, scheduledDelays, scheduledCallbacks, window };
 }
 
 function preparePendingExactDeletion(runtime, paths) {
@@ -939,4 +941,64 @@ test('choosing a new folder commits the staged delete before scanning it', async
     assert.deepEqual(requests.map(request => request.url).slice(0, 2), ['/api/delete', '/api/scan']);
     assert.deepEqual(requests[0].body.files, ['a2.jpg']);
     assert.equal(requests[1].body.directory, '/other');
+});
+
+function recordingDeleteFetch(requests) {
+    return async (_, options) => {
+        const files = JSON.parse(options.body).files;
+        requests.push(files);
+        return { ok: true, json: async () => ({ deleted: files, errors: [] }) };
+    };
+}
+
+test('exact auto dedup stages and commits every photo except the first of each group', async () => {
+    const requests = [];
+    const runtime = createRuntime(recordingDeleteFetch(requests));
+    const groups = [['a1.jpg', 'a2.jpg', 'a3.jpg'], ['b1.jpg', 'b2.jpg']];
+    runtime.api.setExactData(groups);
+    runtime.api.renderList(groups, runtime.elements.exactList, 'exact');
+
+    runtime.elements.autoDedupBtn.dispatch('click');
+    assert.deepEqual([...runtime.api.getPendingDeletion().paths], ['a2.jpg', 'a3.jpg', 'b2.jpg']);
+
+    await runtime.api.commitPendingDeletion();
+    assert.deepEqual(requests, [['a2.jpg', 'a3.jpg', 'b2.jpg']]);
+    assert.deepEqual(runtime.api.snapshot().exactData, []);
+});
+
+test('a staged delete commits by itself when the three-second timer fires', async () => {
+    const requests = [];
+    const runtime = createRuntime(recordingDeleteFetch(requests));
+    renderExactRowsForDelete(runtime);
+    runtime.elements.exactList.querySelectorAll('.clean-btn')[0].dispatch('click');
+    const timer = runtime.scheduledCallbacks.find(entry => entry.delay === 3000);
+    assert.ok(timer);
+    assert.deepEqual(requests, []);
+
+    timer.callback();
+    await flushPromises();
+
+    assert.deepEqual(requests, [['a2.jpg']]);
+    assert.equal(runtime.api.getPendingDeletion(), null);
+});
+
+test('new clean actions are ignored while a delete is being committed', async () => {
+    let release;
+    const runtime = createRuntime(() => new Promise(resolve => {
+        release = () => resolve({ ok: true, json: async () => ({ deleted: ['a2.jpg'], errors: [] }) });
+    }));
+    const rows = renderExactRowsForDelete(runtime);
+    runtime.elements.exactList.querySelectorAll('.clean-btn')[0].dispatch('click');
+    const commit = runtime.api.commitPendingDeletion();
+
+    runtime.elements.exactList.querySelectorAll('.clean-btn')[1].dispatch('click');
+    runtime.elements.autoDedupBtn.dispatch('click');
+    runtime.api.setFocus('exact', 1, 0);
+    runtime.document.dispatch('keydown', { key: 'Delete' });
+
+    assert.notEqual(rows[1].style.display, 'none');
+    assert.deepEqual([...runtime.api.getPendingDeletion().paths], ['a2.jpg']);
+    release();
+    await commit;
+    assert.equal(runtime.api.getPendingDeletion(), null);
 });

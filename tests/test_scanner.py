@@ -599,3 +599,77 @@ def test_scan_directory_does_not_loop_through_a_directory_symlink(tmp_path):
     assert files == [str(image)]
     assert skipped == 0
     assert results[-1][0] == "done"
+
+
+def test_exact_scan_decides_up_to_64_kib_by_prefix_and_full_hashes_larger_files(tmp_path, monkeypatch):
+    # M10: the funnel boundary is "size <= PREFIX_HASH_SIZE".
+    limit = scanner_module.PREFIX_HASH_SIZE
+    payload = os.urandom(limit) + b"\x02"
+    contents = {
+        "at_limit_a.jpg": payload[:limit],
+        "at_limit_b.jpg": payload[:limit],
+        "over_same_a.jpg": payload,
+        "over_same_b.jpg": payload,
+        "over_diff_a.jpg": payload[:limit] + b"\x00",
+        "over_diff_b.jpg": payload[:limit] + b"\x01",
+    }
+    for name, content in contents.items():
+        (tmp_path / name).write_bytes(content)
+    fully_hashed = []
+    real_get_file_hash = scanner_module.get_file_hash
+
+    def recording_get_file_hash(path, cancel_event=None):
+        fully_hashed.append(os.path.basename(path))
+        return real_get_file_hash(path, cancel_event)
+
+    monkeypatch.setattr(scanner_module, "get_file_hash", recording_get_file_hash)
+    events = []
+    Scanner(max_workers=2).scan_directory(str(tmp_path), "exact", lambda event, data: events.append((event, data)))
+
+    groups = [[os.path.basename(path) for path in group] for group in events[-1][1]["exact"]]
+    assert groups == [["at_limit_a.jpg", "at_limit_b.jpg"], ["over_same_a.jpg", "over_same_b.jpg"]]
+    assert sorted(fully_hashed) == ["over_diff_a.jpg", "over_diff_b.jpg", "over_same_a.jpg", "over_same_b.jpg"]
+
+
+class _CancelAfter:
+    """An Event stand-in that reports cancellation from the n-th check on."""
+
+    def __init__(self, checks):
+        self.remaining = checks
+
+    def is_set(self):
+        self.remaining -= 1
+        return self.remaining < 0
+
+
+def test_hashing_stops_and_returns_empty_when_cancelled_midway(tmp_path):
+    big_file = tmp_path / "big.jpg"
+    big_file.write_bytes(os.urandom(scanner_module.HASH_CHUNK_SIZE * 4))
+    image = tmp_path / "image.png"
+    create_image(image)
+
+    cancelled_after_two_chunks = _CancelAfter(checks=2)
+    assert get_file_hash(str(big_file), cancelled_after_two_chunks) == ""
+    assert cancelled_after_two_chunks.remaining < 0
+    assert get_file_hash(str(big_file), _CancelAfter(checks=10**6)) == get_file_hash(str(big_file))
+
+    cancelled = threading.Event()
+    cancelled.set()
+    assert scanner_module.get_file_prefix_hash(str(big_file), cancelled) == ""
+    assert get_image_phash(str(image), cancelled) == ""
+
+
+def test_a_failing_done_callback_does_not_escape_the_scan_thread(tmp_path):
+    create_image(tmp_path / "a.jpg")
+    calls = []
+
+    def callback(event, data):
+        calls.append(event)
+        if event == "done" and calls.count("done") == 1:
+            raise RuntimeError("callback failed")
+
+    scanner = Scanner()
+    scanner.scan_directory(str(tmp_path), "exact", callback)
+
+    assert "done" in calls
+    assert scanner.is_scanning is False
