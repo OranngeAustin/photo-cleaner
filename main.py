@@ -12,7 +12,7 @@ import webview
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from PIL import Image, UnidentifiedImageError
+from PIL import ExifTags, Image, UnidentifiedImageError
 from pydantic import BaseModel
 from send2trash import send2trash
 
@@ -103,16 +103,28 @@ def is_result_path_allowed(path: str) -> bool:
         return any(path_key in paths for paths in allowed_result_paths_by_mode.values())
 
 
+# DateTimeOriginal and DateTimeDigitized, then IFD0's DateTime (last modified).
+_CAPTURE_TIME_TAGS = (36867, 36868)
+_MODIFIED_TIME_TAG = 306
+
+
 def _read_capture_time(path: str) -> str | None:
     """Read a displayable capture time from EXIF without decoding pixel data."""
     try:
         with Image.open(path) as image:
             exif = image.getexif()
-            raw_value = next(
-                (exif.get(tag) for tag in (36867, 36868, 306) if exif.get(tag)),
-                None,
-            )
-    except (OSError, SyntaxError, UnidentifiedImageError):
+            # The capture tags belong in the Exif sub-IFD; getexif() itself
+            # only holds IFD0, where DateTime is the last-modified time.
+            try:
+                exif_ifd = exif.get_ifd(ExifTags.IFD.Exif)
+            except Exception:  # A malformed sub-IFD must not hide IFD0.
+                logger.debug("Unreadable Exif sub-IFD: %s", path, exc_info=True)
+                exif_ifd = {}
+            candidates = [exif_ifd.get(tag) for tag in _CAPTURE_TIME_TAGS]
+            # Some writers put the capture tags in IFD0 instead.
+            candidates += [exif.get(tag) for tag in (*_CAPTURE_TIME_TAGS, _MODIFIED_TIME_TAG)]
+            raw_value = next((value for value in candidates if value), None)
+    except (OSError, SyntaxError, UnidentifiedImageError, Image.DecompressionBombError):
         return None
 
     if raw_value is None:

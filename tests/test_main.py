@@ -260,3 +260,24 @@ def test_result_path_keys_match_per_file_realpath(tmp_path, monkeypatch):
 
     for mode in ("exact", "similar", "missing-mode"):
         assert main._collect_result_path_keys(results, mode) == _original_result_path_keys(results, mode)
+
+
+def test_capture_time_prefers_the_exif_sub_ifd_over_the_modification_time(tmp_path):
+    # M2: DateTimeOriginal lives in the Exif sub-IFD. IFD0's DateTime (306) is
+    # the last-modified time and must only be a fallback.
+    photo = tmp_path / "photo.jpg"
+    exif = Image.Exif()
+    exif[306] = "2030:01:01 00:00:00"
+    exif.get_ifd(0x8769)[36867] = "2024:05:06 07:08:09"
+    Image.new("RGB", (8, 8)).save(photo, exif=exif)
+
+    assert main._read_capture_time(str(photo)) == "2024-05-06 07:08:09"
+
+
+def test_capture_time_is_unknown_for_a_decompression_bomb(tmp_path, monkeypatch):
+    photo = tmp_path / "huge.png"
+    Image.new("RGB", (64, 64)).save(photo)
+    # Pillow refuses to open images above twice this many pixels.
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
+
+    assert main._read_capture_time(str(photo)) is None
