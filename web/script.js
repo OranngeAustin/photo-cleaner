@@ -830,9 +830,32 @@ function findDeleteTargetRow(tabName, focusedRowIdx) {
     }) || null;
 }
 
+// A Chinese IME in Chinese mode can report letter keys as 'Process'; the
+// physical key code still says which letter was pressed (W10).
+function keyName(e) {
+    if ((e.key === 'Process' || e.key === 'Unidentified') && /^Key[A-Z]$/.test(e.code || '')) {
+        return e.code.slice(3).toLowerCase();
+    }
+    return typeof e.key === 'string' ? e.key.toLowerCase() : '';
+}
+
+// Reloading or going back in WebView2 would drop the scan results and any
+// pending undo window.
+function isReloadOrHistoryShortcut(e, k) {
+    if (['f5', 'browserrefresh', 'browserback', 'browserforward'].includes(k)) return true;
+    if ((e.ctrlKey || e.metaKey) && k === 'r') return true;
+    return e.altKey && (k === 'arrowleft' || k === 'arrowright');
+}
+
 document.addEventListener('keydown', (e) => {
+    const k = keyName(e);
+    if (isReloadOrHistoryShortcut(e, k)) {
+        e.preventDefault();
+        return;
+    }
+
     // Check for Ctrl+Z undo
-    if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
+    if ((e.ctrlKey || e.metaKey) && k === 'z') {
         if (pendingDeletion) {
             undoPendingDeletion();
             e.preventDefault();
@@ -854,21 +877,24 @@ document.addEventListener('keydown', (e) => {
             e.preventDefault();
             return;
         }
-        if (!['ArrowRight', 'ArrowLeft', 'd', 'D', 'a', 'A'].includes(e.key)) {
-            return; 
+        if (!['arrowright', 'arrowleft', 'd', 'a'].includes(k)) {
+            return;
         }
     }
-    
+
     const tabName = currentFocus.tab;
     const data = tabName === 'exact' ? exactData : similarData;
-    if (data.length === 0 || currentFocus.rowIdx < 0) return;
+    if (data.length === 0 || currentFocus.rowIdx < 0) {
+        // Otherwise the button the user last clicked takes the key and runs again (Q5).
+        if (e.key === ' ' || e.key === 'Enter') e.preventDefault();
+        return;
+    }
     if (!data[currentFocus.rowIdx]) {
         focusFirstVisibleRow(tabName);
         return;
     }
 
     let { rowIdx, imgIdx } = currentFocus;
-    const k = e.key.toLowerCase();
 
     if (e.key === 'ArrowRight' || k === 'd') {
         const maxImgs = data[rowIdx].length;
@@ -914,7 +940,8 @@ document.addEventListener('keydown', (e) => {
         }
         else if (e.key === ' ') { // Space
             const row = document.getElementById(`row-${tabName}-${rowIdx}`);
-            if (row) {
+            // A held Space auto-repeats; only the first press toggles.
+            if (row && !e.repeat) {
                 const item = row.querySelector(`.image-item[data-i-idx="${imgIdx}"]`);
                 if (item) item.classList.toggle('selected');
             }

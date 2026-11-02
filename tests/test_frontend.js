@@ -50,7 +50,8 @@ function matchesSelector(element, selector) {
     }
     const dataMatch = selector.match(/\[data-([\w-]+)="([^"]*)"\]/);
     if (dataMatch) {
-        return element.dataset[datasetKey(dataMatch[1])] === dataMatch[2];
+        // A real DOM stores every dataset value as a string.
+        return String(element.dataset[datasetKey(dataMatch[1])]) === dataMatch[2];
     }
     return selector.startsWith('.') || classNames.length > 0;
 }
@@ -896,6 +897,69 @@ test('undo keeps a focus the user moved during the undo window', () => {
     runtime.document.dispatch('keydown', { key: 'z', ctrlKey: true });
 
     assert.deepEqual(runtime.api.getFocus(), { rowIdx: 2, imgIdx: 1, tab: 'exact' });
+});
+
+test('W/A/S/D still move focus when a Chinese IME reports letter keys as Process', () => {
+    const runtime = createRuntime(async () => ({ ok: true, json: async () => ({}) }));
+    renderExactRowsForDelete(runtime);
+    runtime.api.setFocus('exact', 0, 0);
+
+    runtime.document.dispatch('keydown', { key: 'Process', code: 'KeyD' });
+    assert.deepEqual(runtime.api.getFocus(), { rowIdx: 0, imgIdx: 1, tab: 'exact' });
+    runtime.document.dispatch('keydown', { key: 'Process', code: 'KeyS' });
+    assert.deepEqual(runtime.api.getFocus(), { rowIdx: 1, imgIdx: 0, tab: 'exact' });
+
+    runtime.document.dispatch('keydown', { key: 'Delete' });
+    runtime.document.dispatch('keydown', { key: 'Process', code: 'KeyZ', ctrlKey: true });
+    assert.equal(runtime.api.getPendingDeletion(), null);
+});
+
+test('holding Space on a photo toggles its selection only once', () => {
+    const runtime = createRuntime(async () => ({ ok: true, json: async () => ({}) }));
+    renderExactRowsForDelete(runtime);
+    runtime.api.setFocus('exact', 0, 1);
+    const item = runtime.elements.exactList.querySelectorAll('.image-item')[1];
+    const before = item.classList.contains('selected');
+
+    // Two events: toggling on both would leave the selection unchanged.
+    runtime.document.dispatch('keydown', { key: ' ', repeat: false });
+    runtime.document.dispatch('keydown', { key: ' ', repeat: true });
+
+    assert.equal(item.classList.contains('selected'), !before);
+});
+
+test('Space and Enter do nothing by default when no photo has keyboard focus', () => {
+    const runtime = createRuntime(async () => ({ ok: true, json: async () => ({}) }));
+    let prevented = 0;
+    const preventDefault = () => { prevented++; };
+
+    runtime.document.dispatch('keydown', { key: ' ', preventDefault });
+    runtime.document.dispatch('keydown', { key: 'Enter', preventDefault });
+
+    assert.equal(prevented, 2);
+});
+
+test('reload and history shortcuts are blocked so the results are not lost', () => {
+    const runtime = createRuntime(async () => ({ ok: true, json: async () => ({}) }));
+    renderExactRowsForDelete(runtime);
+    runtime.api.setFocus('exact', 0, 1);
+    const shortcuts = [
+        { key: 'F5' },
+        { key: 'F5', ctrlKey: true },
+        { key: 'r', ctrlKey: true },
+        { key: 'R', ctrlKey: true, shiftKey: true },
+        { key: 'Process', code: 'KeyR', ctrlKey: true },
+        { key: 'ArrowLeft', altKey: true },
+        { key: 'ArrowRight', altKey: true },
+        { key: 'BrowserBack' },
+    ];
+
+    shortcuts.forEach(shortcut => {
+        let prevented = false;
+        runtime.document.dispatch('keydown', { ...shortcut, preventDefault: () => { prevented = true; } });
+        assert.equal(prevented, true, JSON.stringify(shortcut));
+    });
+    assert.deepEqual(runtime.api.getFocus(), { rowIdx: 0, imgIdx: 1, tab: 'exact' });
 });
 
 test('a failed delete of the only group gives keyboard focus back to it', async () => {
