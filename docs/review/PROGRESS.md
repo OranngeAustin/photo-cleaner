@@ -15,6 +15,35 @@
 | 6 | 算法优化（前 3 项，各自 `claude/perf-*` 分支 + PR → review-fixes） | ✅ 完成 | 6.1 聚类 [PR #5](https://github.com/OranngeAustin/photo-cleaner/pull/5) −69%；6.2 结果路径白名单 [PR #6](https://github.com/OranngeAustin/photo-cleaner/pull/6) −58%；6.3 并行调度 [PR #7](https://github.com/OranngeAustin/photo-cleaner/pull/7) −9%（3 种方案均未达 20%，按规则保留最好的正确版本） |
 | 7 | 总结 → `00-SUMMARY.md` | ✅ 完成 | 见 [00-SUMMARY.md](00-SUMMARY.md) |
 
+## 第三轮：修复低风险 L1–L13（分支 `claude/low-fixes`）
+
+从 `claude/medium-fixes` @ `b916739` 创建，PR 目标为 `claude/medium-fixes`。本轮只遵守 RUNBOOK 的「工作规则」：
+每个问题一个 commit，提交信息引用编号；能写测试的先写测试，并确认修复前失败；每次修复后运行全部测试；
+误报、纯风格偏好或修复风险过大的问题不改，标「⏭ 跳过」并写明原因。
+
+基线（`b916739`）：Python 86 passed、1 skipped（Windows 联接点测试）；Node 32 passed。
+
+| 编号 | 状态 | commit | 说明 |
+|---|---|---|---|
+| L1 | ⬜ 待处理 | | |
+| L2 | ⬜ 待处理 | | |
+| L3 | ⬜ 待处理 | | |
+| L4 | ⬜ 待处理 | | |
+| L5 | ⬜ 待处理 | | |
+| L6 | ⬜ 待处理 | | |
+| L7 | ⬜ 待处理 | | |
+| L8 | ⬜ 待处理 | | |
+| L9 | ⬜ 待处理 | | |
+| L10 | ⬜ 待处理 | | |
+| L11 | ⬜ 待处理 | | |
+| L12 | ⬜ 待处理 | | |
+| L13 | ⬜ 待处理 | | |
+
+### 第三轮决策记录
+
+- **R3-D1 记录位置**：第三轮的进度写在阶段清单之后，而不是文件末尾。第二轮的记录只在 `claude/review-fixes` 上，
+  追加在文件末尾；本分支基于 `claude/medium-fixes`，如果也追加到末尾，两条分支合并时会在同一位置冲突。
+
 ## 阶段 0：基线
 
 环境：Linux x86_64（云端容器，4 核），Python 3.13.18，Node v22.23.4。
