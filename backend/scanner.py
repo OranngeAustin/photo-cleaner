@@ -203,41 +203,40 @@ def _generate_thumbnail_cached(
     """Render a thumbnail cached by path and source file identity metadata."""
     # mtime_ns and file_size intentionally participate in the cache key.
     del mtime_ns, file_size
-    try:
-        with Image.open(image_path) as img:
-            # Read the orientation now: the conversions below drop metadata.
-            # The bounding box applies to the upright image, and only the small
-            # thumbnail is rotated, never the full-size decode.
-            transpose = _orientation_transpose(img)
-            if transpose in _SWAPS_AXES:
-                max_width, max_height = max_height, max_width
-            max_size = (max_width, max_height)
-            if img.format == 'JPEG':
-                # Decode at a reduced scale (down to 1/8); img.size reports it.
-                img.draft('RGB', max_size)
-            with _decode_budget.reserve(img.width * img.height):
-                img.load()
-                # JPEG has no alpha channel. Normalize PNG/GIF transparency first,
-                # including palette images whose transparency is a byte table.
-                if "transparency" in img.info:
-                    img = img.convert("RGBA")
-                if img.mode not in ("RGB", "RGBA", "LA"):
-                    img = img.convert("RGB")
-                img.thumbnail(max_size)
-            # Composite on a deterministic white background only after
-            # shrinking: a full-size background would double the memory.
-            if img.mode in ("RGBA", "LA"):
-                background = Image.new("RGB", img.size, "white")
-                background.paste(img, mask=img.getchannel("A"))
-                img = background
-            if transpose is not None:
-                img = img.transpose(transpose)
-            img_byte_arr = io.BytesIO()
-            img.save(img_byte_arr, format='JPEG', quality=85)
-            return img_byte_arr.getvalue()
-    except Exception:
-        logger.warning("Failed to generate thumbnail: %s", image_path, exc_info=True)
-        return b""
+    # Failures propagate on purpose: lru_cache keeps only returned values, so a
+    # file briefly locked by another process is retried on the next request
+    # instead of staying cached as an empty thumbnail.
+    with Image.open(image_path) as img:
+        # Read the orientation now: the conversions below drop metadata.
+        # The bounding box applies to the upright image, and only the small
+        # thumbnail is rotated, never the full-size decode.
+        transpose = _orientation_transpose(img)
+        if transpose in _SWAPS_AXES:
+            max_width, max_height = max_height, max_width
+        max_size = (max_width, max_height)
+        if img.format == 'JPEG':
+            # Decode at a reduced scale (down to 1/8); img.size reports it.
+            img.draft('RGB', max_size)
+        with _decode_budget.reserve(img.width * img.height):
+            img.load()
+            # JPEG has no alpha channel. Normalize PNG/GIF transparency first,
+            # including palette images whose transparency is a byte table.
+            if "transparency" in img.info:
+                img = img.convert("RGBA")
+            if img.mode not in ("RGB", "RGBA", "LA"):
+                img = img.convert("RGB")
+            img.thumbnail(max_size)
+        # Composite on a deterministic white background only after
+        # shrinking: a full-size background would double the memory.
+        if img.mode in ("RGBA", "LA"):
+            background = Image.new("RGB", img.size, "white")
+            background.paste(img, mask=img.getchannel("A"))
+            img = background
+        if transpose is not None:
+            img = img.transpose(transpose)
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format='JPEG', quality=85)
+        return img_byte_arr.getvalue()
 
 
 def clear_thumbnail_cache() -> None:
@@ -248,6 +247,10 @@ def generate_thumbnail(image_path: str, max_size: tuple[int, int] = (256, 256)) 
     try:
         real_path = os.path.realpath(image_path)
         stat_result = os.stat(real_path)
+    except OSError:
+        logger.warning("Failed to stat thumbnail source: %s", image_path, exc_info=True)
+        return b""
+    try:
         return _generate_thumbnail_cached(
             real_path,
             int(max_size[0]),
@@ -255,8 +258,8 @@ def generate_thumbnail(image_path: str, max_size: tuple[int, int] = (256, 256)) 
             stat_result.st_mtime_ns,
             stat_result.st_size,
         )
-    except OSError:
-        logger.warning("Failed to stat thumbnail source: %s", image_path, exc_info=True)
+    except Exception:
+        logger.warning("Failed to generate thumbnail: %s", image_path, exc_info=True)
         return b""
 
 

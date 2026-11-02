@@ -696,3 +696,27 @@ def test_prefix_read_reports_the_file_length_up_to_one_byte_past_the_prefix(tmp_
 
     assert bytes_read == expected_length
     assert prefix_hash == scanner_module.get_file_prefix_hash(str(path))
+
+
+def test_a_failed_thumbnail_is_retried_on_the_next_request(tmp_path, monkeypatch):
+    """L2: a file briefly locked by another process (or a MemoryError) must not
+    leave an empty thumbnail in the cache until the next scan or delete."""
+    image = tmp_path / "a.jpg"
+    create_image(image)
+    clear_thumbnail_cache()
+    real_open = scanner_module.Image.open
+    opened = []
+
+    def flaky_open(*args, **kwargs):
+        opened.append(args[0])
+        if len(opened) == 1:
+            raise PermissionError("locked by another process")
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(scanner_module.Image, "open", flaky_open)
+
+    assert scanner_module.generate_thumbnail(str(image)) == b""
+    retried = scanner_module.generate_thumbnail(str(image))
+
+    assert len(opened) == 2
+    assert Image.open(io.BytesIO(retried)).format == "JPEG"
