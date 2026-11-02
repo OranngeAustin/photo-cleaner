@@ -232,6 +232,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
 // Auto Deduplicate
 const autoDedupBtn = document.getElementById('auto-dedup-btn');
 const similarAutoDedupBtn = document.getElementById('similar-auto-dedup-btn');
+const cancelScanBtn = document.getElementById('cancel-scan-btn');
 
 function setScanControls(isScanning) {
     scanInProgress = isScanning;
@@ -241,6 +242,24 @@ function setScanControls(isScanning) {
     });
     if (autoDedupBtn) autoDedupBtn.disabled = isScanning;
     if (similarAutoDedupBtn) similarAutoDedupBtn.disabled = isScanning;
+    if (cancelScanBtn) {
+        cancelScanBtn.hidden = !isScanning;
+        cancelScanBtn.disabled = false;
+        cancelScanBtn.textContent = 'Cancel scan';
+    }
+}
+
+// The scanner stops at its next checkpoint and still reports `done`, with
+// `cancelled` set; polling keeps running until then (L7).
+if (cancelScanBtn) {
+    cancelScanBtn.addEventListener('click', () => {
+        if (!scanInProgress) return;
+        cancelScanBtn.disabled = true;
+        cancelScanBtn.textContent = 'Cancelling…';
+        Promise.resolve()
+            .then(() => fetch('/api/cancel_scan', { method: 'POST' }))
+            .catch(() => {});
+    });
 }
 
 // A newer scan may have started by the time this fires; keep its progress visible.

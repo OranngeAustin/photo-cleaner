@@ -252,7 +252,10 @@ function createRuntime(fetchImpl, confirmImpl = () => true) {
         toastContainer: add('toast-container'),
         toastMessage: add('toast-msg'),
         toastUndo: add('toast-undo-btn'),
+        cancelScanBtn: add('cancel-scan-btn'),
     };
+    // index.html ships the cancel button with the hidden attribute.
+    elements.cancelScanBtn.hidden = true;
     const close = document.createElement('button');
     close.classList.add('lightbox-close');
     elements.lightbox.appendChild(close);
@@ -1163,6 +1166,56 @@ test('status polling gives up after repeated failures and cancels the backend sc
         requests.filter(request => request.url === '/api/cancel_scan').map(request => request.method),
         ['POST']
     );
+});
+
+function cancellableScanFetch(requests) {
+    let cancelled = false;
+    return async (url, options = {}) => {
+        requests.push({ url, method: options.method || 'GET' });
+        if (url === '/api/scan') return { ok: true, json: async () => ({ status: 'started' }) };
+        if (url === '/api/cancel_scan') {
+            cancelled = true;
+            return { ok: true, json: async () => ({ status: 'cancelling' }) };
+        }
+        if (url === '/api/scan_status') {
+            return {
+                ok: true,
+                json: async () => ({
+                    done: cancelled,
+                    cancelled,
+                    message: 'Hashing files...',
+                    progress: { current: 1, total: 4 },
+                    results: { exact: [], similar: [] },
+                }),
+            };
+        }
+        return { ok: true, json: async () => ({}) };
+    };
+}
+
+test('the cancel button stops a running scan and the status bar says it was cancelled', async () => {
+    const requests = [];
+    const runtime = createRuntime(cancellableScanFetch(requests));
+    const cancelButton = runtime.elements.cancelScanBtn;
+    runtime.window.pywebview = { api: { choose_directory: async () => '/photos' } };
+
+    runtime.elements.browseBtn.dispatch('click');
+    await flushPromises();
+    assert.equal(cancelButton.hidden, false);
+
+    cancelButton.dispatch('click');
+    await flushPromises();
+    assert.equal(cancelButton.disabled, true);
+    assert.deepEqual(
+        requests.filter(request => request.url === '/api/cancel_scan').map(request => request.method),
+        ['POST']
+    );
+
+    runtime.scheduledCallbacks.pop().callback();
+    await flushPromises();
+    assert.equal(cancelButton.hidden, true);
+    assert.equal(runtime.elements.browseBtn.disabled, false);
+    assert.ok(runtime.elements.statusText.textContent.includes('Scan cancelled'));
 });
 
 test('committing a delete keeps keyboard focus on the group the user was on', async () => {
