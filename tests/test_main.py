@@ -406,6 +406,12 @@ def test_requests_from_the_app_page_are_accepted(headers):
         _restore_scan_state(saved_state)
 
 
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
+def test_the_api_documentation_pages_are_not_served(path):
+    # L15: the app's own page never needs them, and they list every endpoint.
+    assert _asgi_status("GET", path, {"host": "127.0.0.1:8000"}) == 404
+
+
 def test_result_paths_are_resolved_outside_the_scan_lock(tmp_path, monkeypatch):
     """L1: realpath can block on a slow or network drive. While it runs under
     scan_lock, /api/scan_status and every file endpoint wait behind it."""

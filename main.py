@@ -77,7 +77,8 @@ class LocalRequestGuard:
         await self.app(scope, receive, send)
 
 
-app = FastAPI()
+# The app's own page never uses the generated API docs (L15).
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(LocalRequestGuard)
 thumbnail_scanner = Scanner()
 scan_lock = threading.Lock()
