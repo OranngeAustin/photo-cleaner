@@ -1029,3 +1029,60 @@ test('the post-scan message timer does not hide the progress of a newer scan', a
     hideTimer.callback();
     assert.equal(runtime.elements.statusBar.classList.contains('hidden'), false);
 });
+
+function flakyStatusFetch(requests, failuresBeforeDone) {
+    let statusCalls = 0;
+    return async (url, options = {}) => {
+        requests.push({ url, method: options.method || 'GET' });
+        if (url === '/api/scan') return { ok: true, json: async () => ({ status: 'started' }) };
+        if (url === '/api/scan_status') {
+            statusCalls += 1;
+            if (statusCalls <= failuresBeforeDone) throw new Error('Failed to fetch');
+            const results = { exact: [['a1.jpg', 'a2.jpg']], similar: [] };
+            return { ok: true, json: async () => ({ done: true, message: '', progress: {}, cancelled: false, results }) };
+        }
+        return { ok: true, json: async () => ({ status: 'cancelling' }) };
+    };
+}
+
+test('a single failed status poll retries instead of abandoning the scan', async () => {
+    const requests = [];
+    const runtime = createRuntime(flakyStatusFetch(requests, 1));
+    runtime.window.pywebview = { api: { choose_directory: async () => '/photos' } };
+    runtime.elements.browseBtn.dispatch('click');
+    await flushPromises();
+
+    assert.equal(runtime.elements.browseBtn.disabled, true);
+    const retry = runtime.scheduledCallbacks.at(-1);
+    assert.equal(retry.delay, 500);
+    retry.callback();
+    await flushPromises();
+
+    assert.equal(runtime.elements.browseBtn.disabled, false);
+    assert.equal(runtime.elements.exactList.children.length, 1);
+    assert.equal(requests.some(request => request.url === '/api/cancel_scan'), false);
+});
+
+test('status polling gives up after repeated failures and cancels the backend scan', async () => {
+    const requests = [];
+    const runtime = createRuntime(flakyStatusFetch(requests, Infinity));
+    runtime.window.pywebview = { api: { choose_directory: async () => '/photos' } };
+    runtime.elements.browseBtn.dispatch('click');
+    await flushPromises();
+
+    const retryDelays = [];
+    for (let i = 0; i < 10 && runtime.elements.browseBtn.disabled; i++) {
+        const timer = runtime.scheduledCallbacks.pop();
+        retryDelays.push(timer.delay);
+        timer.callback();
+        await flushPromises();
+    }
+
+    assert.deepEqual(retryDelays, [500, 1000, 2000, 4000]);
+    assert.equal(runtime.elements.browseBtn.disabled, false);
+    assert.ok(runtime.elements.statusText.textContent.startsWith('⚠'));
+    assert.deepEqual(
+        requests.filter(request => request.url === '/api/cancel_scan').map(request => request.method),
+        ['POST']
+    );
+});

@@ -391,13 +391,35 @@ async function startScan(directory, mode) {
     }
 }
 
-async function pollStatus(mode) {
+// One failed status poll does not mean the scan stopped, so retry with backoff.
+// Giving up abandons the results: cancel the backend scan as well, or the next
+// scan is refused while it keeps running.
+const STATUS_POLL_RETRY_DELAYS = [500, 1000, 2000, 4000];
+
+function retryOrAbandonScan(mode, failures, error) {
+    if (failures < STATUS_POLL_RETRY_DELAYS.length) {
+        setTimeout(() => pollStatus(mode, failures + 1), STATUS_POLL_RETRY_DELAYS[failures]);
+        return;
+    }
+    Promise.resolve()
+        .then(() => fetch('/api/cancel_scan', { method: 'POST' }))
+        .catch(() => {});
+    setScanControls(false);
+    showScanError(error.message || 'Lost connection while scanning.');
+}
+
+async function pollStatus(mode, failures = 0) {
     if (!scanInProgress) return;
+    let data;
     try {
         const res = await fetch('/api/scan_status');
         if (!res.ok) throw new Error(`Status request failed (${res.status})`);
-        const data = await res.json();
-    
+        data = await res.json();
+    } catch (error) {
+        retryOrAbandonScan(mode, failures, error);
+        return;
+    }
+    try {
     statusText.textContent = data.message;
     if (data.progress && data.progress.total) {
         const pct = (data.progress.current / data.progress.total) * 100;
