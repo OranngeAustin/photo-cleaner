@@ -208,6 +208,11 @@ def delete_files(req: DeleteRequest):
     errors: list[str] = []
     for requested_path in req.files:
         try:
+            # Trashing a symlink would resolve to, and remove, a different file
+            # than the one the user selected.
+            if os.path.islink(os.path.abspath(requested_path)):
+                errors.append(requested_path)
+                continue
             real_path = _resolve_path(requested_path)
             if not is_result_path_allowed(real_path) or not os.path.isfile(real_path):
                 errors.append(requested_path)

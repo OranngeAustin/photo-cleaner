@@ -1,6 +1,8 @@
+import os
 import sys
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -161,5 +163,32 @@ def test_result_from_other_cached_mode_remains_previewable_after_empty_rescan(tm
         assert thumbnail_response.status_code == 200
         assert image_response.status_code == 200
         assert info_response["name"] == "similar-result.jpg"
+    finally:
+        _restore_scan_state(saved_state)
+
+
+def test_delete_refuses_a_symlink_that_resolves_to_a_result_file(tmp_path, monkeypatch):
+    saved_state = _save_scan_state()
+    try:
+        target = tmp_path / "a.jpg"
+        target.write_bytes(b"photo")
+        link = tmp_path / "b.jpg"
+        try:
+            os.symlink(target, link)
+        except (OSError, NotImplementedError):
+            pytest.skip("Creating symlinks requires extra privileges on this platform")
+        main.allowed_scan_root = str(tmp_path)
+        main.allowed_result_paths_by_mode = {
+            "exact": {main._path_key(str(target))},
+            "similar": set(),
+        }
+
+        sent_to_trash = []
+        monkeypatch.setattr(main, "send2trash", lambda path: sent_to_trash.append(path))
+        response = main.delete_files(main.DeleteRequest(files=[str(link)]))
+
+        assert response == {"deleted": [], "errors": [str(link)]}
+        assert sent_to_trash == []
+        assert main.is_result_path_allowed(str(target)) is True
     finally:
         _restore_scan_state(saved_state)

@@ -386,7 +386,11 @@ class Scanner:
                             if entry.is_dir(follow_symlinks=False):
                                 stack.append(entry.path)
                                 continue
-                            if not entry.is_file():
+                            # Do not follow file symlinks either. A link and its
+                            # target would form a fake exact-duplicate pair, and
+                            # deleting the link path resolves to (and trashes)
+                            # the target the user chose to keep.
+                            if entry.is_symlink() or not entry.is_file():
                                 continue
                             extension = os.path.splitext(entry.name)[1].lower()
                             if extension not in SUPPORTED_EXTENSIONS:

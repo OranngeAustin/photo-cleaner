@@ -268,3 +268,24 @@ def test_scan_directory_symlink_cycle(tmp_path):
     results = []
     scanner.scan_directory(str(d1), 'exact', lambda ev, data: results.append((ev, data)))
     assert results[-1][0] == 'done'
+
+
+def _symlink_or_skip(link, target):
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("Creating symlinks requires extra privileges on this platform")
+
+
+def test_exact_scan_does_not_pair_a_file_symlink_with_its_target(tmp_path):
+    target = tmp_path / "a.jpg"
+    create_image(target)
+    _symlink_or_skip(tmp_path / "b.jpg", target)
+
+    scanner = Scanner(max_workers=1)
+    files, _, _ = scanner._enumerate_image_files(str(tmp_path), collect_sizes=True)
+    results = []
+    scanner.scan_directory(str(tmp_path), "exact", lambda event, data: results.append((event, data)))
+
+    assert files == [str(target)]
+    assert results[-1][1]["exact"] == []
