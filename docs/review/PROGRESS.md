@@ -12,7 +12,7 @@
 | 3 | 安全审计 → `02-findings.md`「安全」 | ✅ 完成 | 新增 M11（DNS 重绑定）、L14、L15；注入/反序列化/密钥：无；pip-audit：无已知漏洞 |
 | 4 | 修复高危问题 + PR → main | ✅ 完成 | H1–H4 已修复（各 1 commit + 回归测试），[PR #4](https://github.com/OranngeAustin/photo-cleaner/pull/4) → main；Python 21✓/1✗（既有）、Node 23✓ |
 | 5 | 性能分析 → `03-perf-plan.md` | ✅ 完成 | 新增 `benchmarks/bench_scanner.py`；选中：聚类、结果路径白名单、并行调度 |
-| 6 | 算法优化（前 3 项，各自 `claude/perf-*` 分支 + PR → review-fixes） | 🔄 进行中 | 6.1 聚类 ✅ [PR #5](https://github.com/OranngeAustin/photo-cleaner/pull/5)（−69%）；6.2 结果路径白名单 ⬜；6.3 并行调度 ⬜ |
+| 6 | 算法优化（前 3 项，各自 `claude/perf-*` 分支 + PR → review-fixes） | 🔄 进行中 | 6.1 聚类 ✅ [PR #5](https://github.com/OranngeAustin/photo-cleaner/pull/5)（−69%）；6.2 结果路径白名单 ✅ [PR #6](https://github.com/OranngeAustin/photo-cleaner/pull/6)（−58%）；6.3 并行调度 ⬜ |
 | 7 | 总结 → `00-SUMMARY.md` | ⬜ 未开始 | |
 
 ## 阶段 0：基线
@@ -57,3 +57,5 @@ Pillow 12.3.0、pillow-heif 1.8.1、ImageHash 4.3.2、Send2Trash 2.1.0、pywebvi
   RUNBOOK 要求优化前先用特征测试固定输入输出，这项优化做不到。因此只写进 03-perf-plan 和总结，交给人工决策。
 - **D9 聚类取消粒度**：取消检查从每个候选一次改为每个锚点一次，单线程下的确定性结果与原实现一致，并由特征测试固定。
   多线程下取消发生在锚点内部的时间点本来就不确定。最坏偏斜输入仍为 O(K²)，只拿到 1.46× 的提升，已在 PR 中如实说明。
+- **D10 白名单优化保持精确语义**：去掉逐文件的 `islink` 检查还能更快，但符号链接文件的白名单键会从「链接目标」变成「链接所在位置」。
+  虽然这样更严格，却改变了行为，所以没有采用。现在的做法是：遇到符号链接文件就回退到原来的逐条 `realpath`。
