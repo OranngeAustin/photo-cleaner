@@ -116,26 +116,27 @@ def get_file_hash(filepath: str, cancel_event: threading.Event | None = None) ->
         return ""
 
 
-def get_file_prefix_hash_and_size(
+def get_file_prefix_hash_and_length(
     filepath: str,
     cancel_event: threading.Event | None = None,
     prefix_size: int = PREFIX_HASH_SIZE,
 ) -> tuple[str, int] | None:
-    """Hash a file prefix and return it with the file size seen by that read.
+    """Hash a file prefix and return it with the number of bytes read.
 
-    The size comes from ``fstat`` on the same handle, after the read.  If the
-    file grew or shrank since it was enumerated (a copy or sync in progress),
-    the caller sees a size that differs from the enumerated one.
+    One byte past the prefix is read, so the length is the file's size when
+    the file fits in the prefix and ``prefix_size + 1`` when it does not.  A
+    small file that grew or shrank since enumeration (a copy or sync still in
+    progress) shows up as a length that differs from its enumerated size,
+    without the cost of an extra ``fstat`` call.
     """
     try:
         if _was_cancelled(cancel_event):
             return None
         with open(filepath, 'rb') as file_obj:
-            prefix = file_obj.read(prefix_size)
-            current_size = os.fstat(file_obj.fileno()).st_size
+            data = file_obj.read(prefix_size + 1)
         if _was_cancelled(cancel_event):
             return None
-        return hashlib.sha256(prefix).hexdigest(), current_size
+        return hashlib.sha256(memoryview(data)[:prefix_size]).hexdigest(), len(data)
     except OSError:
         logger.warning("Failed to hash file prefix: %s", filepath, exc_info=True)
         return None
@@ -147,7 +148,7 @@ def get_file_prefix_hash(
     prefix_size: int = PREFIX_HASH_SIZE,
 ) -> str:
     """Hash only a file prefix for the exact-match prefilter."""
-    result = get_file_prefix_hash_and_size(filepath, cancel_event, prefix_size)
+    result = get_file_prefix_hash_and_length(filepath, cancel_event, prefix_size)
     return result[0] if result else ""
 
 
@@ -574,13 +575,13 @@ class Scanner:
         # proves nothing about them, even if they were small when listed.
         resized_files: set[str] = set()
         for completed, (filepath, prefix_result) in enumerate(
-            self._iter_parallel_results(files_to_filter, get_file_prefix_hash_and_size), start=1
+            self._iter_parallel_results(files_to_filter, get_file_prefix_hash_and_length), start=1
         ):
             if self.cancel_requested:
                 return []
             if prefix_result:
-                prefix_hash, current_size = prefix_result
-                if current_size != file_sizes[filepath]:
+                prefix_hash, bytes_read = prefix_result
+                if bytes_read != min(file_sizes[filepath], PREFIX_HASH_SIZE + 1):
                     resized_files.add(filepath)
                 prefix_groups[(file_sizes[filepath], prefix_hash)].append(filepath)
             if completed % 100 == 0:

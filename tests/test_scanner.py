@@ -685,3 +685,14 @@ def test_prefix_hash_covers_exactly_the_first_64_kib(tmp_path, size):
 
     expected = hashlib.sha256(data[:scanner_module.PREFIX_HASH_SIZE]).hexdigest()
     assert scanner_module.get_file_prefix_hash(str(path)) == expected
+
+
+@pytest.mark.parametrize(("size", "expected_length"), [(1_000, 1_000), (65_536, 65_536), (70_000, 65_537)])
+def test_prefix_read_reports_the_file_length_up_to_one_byte_past_the_prefix(tmp_path, size, expected_length):
+    path = tmp_path / "file.jpg"
+    path.write_bytes(os.urandom(size))
+
+    prefix_hash, bytes_read = scanner_module.get_file_prefix_hash_and_length(str(path))
+
+    assert bytes_read == expected_length
+    assert prefix_hash == scanner_module.get_file_prefix_hash(str(path))
