@@ -10,8 +10,8 @@
 | 1 | 架构摸底 → `01-architecture.md` | ✅ 完成 | 审查顺序：main.py → web/ → backend/ → tests/ → 根配置 → docs/.claude |
 | 2 | 代码审查 → `02-findings.md` | ✅ 完成 | 高 4（H1–H4）、中 10、低 13、待人工确认 5 |
 | 3 | 安全审计 → `02-findings.md`「安全」 | ✅ 完成 | 新增 M11（DNS 重绑定）、L14、L15；注入/反序列化/密钥：无；pip-audit：无已知漏洞 |
-| 4 | 修复高危问题 + PR → main | 🔄 进行中 | 计划修复 H1–H4 |
-| 5 | 性能分析 → `03-perf-plan.md` | ⬜ 未开始 | |
+| 4 | 修复高危问题 + PR → main | ✅ 完成 | H1–H4 已修复（各 1 commit + 回归测试），[PR #4](https://github.com/OranngeAustin/photo-cleaner/pull/4) → main；Python 21✓/1✗（既有）、Node 23✓ |
+| 5 | 性能分析 → `03-perf-plan.md` | 🔄 进行中 | |
 | 6 | 算法优化（前 3 项，各自 `claude/perf-*` 分支 + PR → review-fixes） | ⬜ 未开始 | |
 | 7 | 总结 → `00-SUMMARY.md` | ⬜ 未开始 | |
 
@@ -48,3 +48,8 @@ Pillow 12.3.0、pillow-heif 1.8.1、ImageHash 4.3.2、Send2Trash 2.1.0、pywebvi
 - **D4 基准脚本**：仓库原本没有基准测试；`benchmarks/bench_scanner.py` 在阶段 5 一并提交（先放工作区，不随阶段 2 提交）。
 - **D5 安全定级**：DNS 重绑定（M11）机制已验证，但端口随机、需要先探测，定为「中」。按 RUNBOOK，阶段 4
   只修「高」，所以 M11 只给出修复建议，列入总结的下一步。
+- **D6 阶段 4 范围**：只修 H1–H4。Q1（send2trash 在无回收站卷上可能永久删除）虽然建议定为高，
+  但无法在 Linux 上验证，而且修复需要 Windows 专用代码或新增 pywin32 依赖，所以留给人工确认。
+  H4 保留了「焦点不可见时清理容器内第一个可见行」的退路，让纯鼠标滚动的使用方式保持原有行为。
+- **D7 测试断言写法**：H4 的测试比较行 id，而不是直接比较假 DOM 元素。原因是断言失败时，
+  Node 会深度展开整张带循环引用的假 DOM 图来生成错误信息，进程会因此被 SIGKILL。
