@@ -7,6 +7,7 @@ import threading
 from bisect import bisect_right
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from functools import lru_cache
 from typing import Callable, Dict, Iterator, TypeVar
 
@@ -38,8 +39,56 @@ SIMILARITY_THRESHOLD = 5
 PHASH_SEGMENTS = ((0, 11), (11, 11), (22, 11), (33, 11), (44, 10), (54, 10))
 
 
+# Decoding costs about 4 bytes per pixel here (an RGB decode plus pHash's
+# greyscale copy).  Concurrent decodes share this budget, roughly 0.8 GB: about
+# fifteen 12 MP photos at once, or one image at Pillow's 179 MP hard limit.
+DECODE_PIXEL_BUDGET = 192_000_000
+
+
 def _was_cancelled(cancel_event: threading.Event | None) -> bool:
     return cancel_event is not None and cancel_event.is_set()
+
+
+class _PixelBudget:
+    """Caps the pixels that threads decode at the same time.
+
+    Up to 32 scan workers (plus thumbnail requests) could otherwise each hold a
+    full-size panorama or large TIFF in memory at once.  An image larger than
+    the whole budget is still decoded, but alone.
+    """
+
+    def __init__(self, capacity: int):
+        self.capacity = capacity
+        self._in_use = 0
+        self._condition = threading.Condition()
+
+    @contextmanager
+    def reserve(self, pixels: int, cancel_event: threading.Event | None = None) -> Iterator[bool]:
+        """Hold ``pixels`` of the budget for the ``with`` body.
+
+        Yields False, without holding anything, if ``cancel_event`` is set
+        while waiting for room.
+        """
+        amount = min(max(int(pixels), 0), self.capacity)
+        with self._condition:
+            while self._in_use + amount > self.capacity and not _was_cancelled(cancel_event):
+                # Time out now and then to notice a cancel nobody notifies.
+                self._condition.wait(timeout=0.1)
+            granted = self._in_use + amount <= self.capacity
+            if granted:
+                self._in_use += amount
+        if not granted:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            with self._condition:
+                self._in_use -= amount
+                self._condition.notify_all()
+
+
+_decode_budget = _PixelBudget(DECODE_PIXEL_BUDGET)
 
 
 def get_file_hash(filepath: str, cancel_event: threading.Event | None = None) -> str:
@@ -107,7 +156,11 @@ def get_image_phash(filepath: str, cancel_event: threading.Event | None = None) 
         if _was_cancelled(cancel_event):
             return ""
         with Image.open(filepath) as img:
-            result = str(imagehash.phash(img))
+            # Opening reads only the header; phash() decodes the full image.
+            with _decode_budget.reserve(img.width * img.height, cancel_event) as granted:
+                if not granted:
+                    return ""
+                result = str(imagehash.phash(img))
         return "" if _was_cancelled(cancel_event) else result
     except Exception:
         logger.warning("Failed to compute pHash: %s", filepath, exc_info=True)
@@ -159,20 +212,23 @@ def _generate_thumbnail_cached(
                 max_width, max_height = max_height, max_width
             max_size = (max_width, max_height)
             if img.format == 'JPEG':
+                # Decode at a reduced scale (down to 1/8); img.size reports it.
                 img.draft('RGB', max_size)
+            with _decode_budget.reserve(img.width * img.height):
                 img.load()
-            # JPEG has no alpha channel. Normalize PNG/GIF transparency first,
-            # including palette images whose transparency is a byte table, then
-            # composite it on a deterministic white background.
-            if "transparency" in img.info:
-                img = img.convert("RGBA")
+                # JPEG has no alpha channel. Normalize PNG/GIF transparency first,
+                # including palette images whose transparency is a byte table.
+                if "transparency" in img.info:
+                    img = img.convert("RGBA")
+                if img.mode not in ("RGB", "RGBA", "LA"):
+                    img = img.convert("RGB")
+                img.thumbnail(max_size)
+            # Composite on a deterministic white background only after
+            # shrinking: a full-size background would double the memory.
             if img.mode in ("RGBA", "LA"):
                 background = Image.new("RGB", img.size, "white")
                 background.paste(img, mask=img.getchannel("A"))
                 img = background
-            elif img.mode != "RGB":
-                img = img.convert("RGB")
-            img.thumbnail(max_size)
             if transpose is not None:
                 img = img.transpose(transpose)
             img_byte_arr = io.BytesIO()

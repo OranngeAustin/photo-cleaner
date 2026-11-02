@@ -478,3 +478,102 @@ def test_thumbnail_follows_exif_orientation(tmp_path):
     top, bottom = thumbnail.getpixel((64, 32)), thumbnail.getpixel((64, 224))
     assert top[0] > 200 and top[2] < 60
     assert bottom[2] > 200 and bottom[0] < 60
+
+
+def test_pixel_budget_makes_a_large_request_wait_for_room():
+    budget = scanner_module._PixelBudget(100)
+    events = []
+    first_holding = threading.Event()
+    release_first = threading.Event()
+
+    def first():
+        with budget.reserve(60) as granted:
+            events.append(("first", granted))
+            first_holding.set()
+            release_first.wait(5)
+
+    def second():
+        first_holding.wait(5)
+        with budget.reserve(60) as granted:
+            events.append(("second", granted))
+
+    threads = [threading.Thread(target=first), threading.Thread(target=second)]
+    for thread in threads:
+        thread.start()
+    first_holding.wait(5)
+    threading.Event().wait(0.2)
+    assert events == [("first", True)]
+
+    release_first.set()
+    for thread in threads:
+        thread.join(5)
+    assert events == [("first", True), ("second", True)]
+
+
+def test_pixel_budget_runs_an_oversized_image_alone_and_gives_up_on_cancel():
+    budget = scanner_module._PixelBudget(100)
+    cancel_event = threading.Event()
+    with budget.reserve(500) as granted:
+        assert granted
+        cancel_event.set()
+        with budget.reserve(1, cancel_event) as waiting_granted:
+            assert waiting_granted is False
+    with budget.reserve(100) as granted:
+        assert granted
+
+
+def test_similar_scan_keeps_concurrent_decodes_within_the_pixel_budget(tmp_path, monkeypatch):
+    # M7: every worker used to decode a full-size image at the same time.
+    paths = []
+    for index in range(6):
+        path = tmp_path / f"img{index}.png"
+        create_image(path, size=(100, 100), color=(index * 40, 0, 0))
+        paths.append(str(path))
+    monkeypatch.setattr(scanner_module, "_decode_budget", scanner_module._PixelBudget(2 * 100 * 100))
+    real_phash = scanner_module.imagehash.phash
+    lock = threading.Lock()
+    running = peak = 0
+
+    def slow_phash(image):
+        nonlocal running, peak
+        with lock:
+            running += 1
+            peak = max(peak, running)
+        try:
+            threading.Event().wait(0.05)
+            return real_phash(image)
+        finally:
+            with lock:
+                running -= 1
+
+    monkeypatch.setattr(scanner_module.imagehash, "phash", slow_phash)
+    results = list(Scanner(max_workers=6)._iter_parallel_results(paths, get_image_phash))
+
+    assert peak == 2
+    assert sorted(path for path, phash in results if phash) == paths
+
+
+def test_thumbnail_reserves_the_reduced_jpeg_decode_and_composites_after_shrinking(tmp_path, monkeypatch):
+    reserved = []
+    real_budget = scanner_module._PixelBudget(10**9)
+
+    class RecordingBudget:
+        def reserve(self, pixels, cancel_event=None):
+            reserved.append(pixels)
+            return real_budget.reserve(pixels, cancel_event)
+
+    monkeypatch.setattr(scanner_module, "_decode_budget", RecordingBudget())
+    jpeg = tmp_path / "large.jpg"
+    png = tmp_path / "large.png"
+    create_image(jpeg, size=(1600, 1200))
+    create_image(png, mode="RGBA", size=(1600, 1200), color=(0, 0, 255, 0))
+    clear_thumbnail_cache()
+
+    assert scanner_module.generate_thumbnail(str(jpeg))
+    png_thumbnail = scanner_module.generate_thumbnail(str(png))
+
+    # JPEG decodes at 1/4 scale for a 256 px box; PNG has no reduced decode.
+    assert reserved == [400 * 300, 1600 * 1200]
+    with Image.open(io.BytesIO(png_thumbnail)) as thumbnail:
+        assert thumbnail.size == (256, 192)
+        assert all(channel > 235 for channel in thumbnail.getpixel((128, 96)))
