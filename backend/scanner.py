@@ -365,6 +365,9 @@ class Scanner:
         self.is_scanning = False
         self.scanned_files = 0
         self.total_files = 0
+        # Files a scan step could not read or decode (locked by another
+        # program, truncated, ...); they are left out of the results.
+        self.unreadable_files = 0
 
     @property
     def cancel_requested(self) -> bool:
@@ -454,6 +457,7 @@ class Scanner:
         self.is_scanning = True
         self.scanned_files = 0
         self.total_files = 0
+        self.unreadable_files = 0
         skipped_files = 0
 
         try:
@@ -480,6 +484,7 @@ class Scanner:
                     'similar': [],
                     'cancelled': self.cancel_requested,
                     'skipped_files': skipped_files,
+                    'unreadable_files': self.unreadable_files,
                 })
                 return
 
@@ -490,6 +495,7 @@ class Scanner:
                     'similar': similar_results,
                     'cancelled': self.cancel_requested,
                     'skipped_files': skipped_files,
+                    'unreadable_files': self.unreadable_files,
                 })
                 return
 
@@ -621,6 +627,8 @@ class Scanner:
                 if bytes_read != min(file_sizes[filepath], PREFIX_HASH_SIZE + 1):
                     resized_files.add(filepath)
                 prefix_groups[(file_sizes[filepath], prefix_hash)].append(filepath)
+            elif not self.cancel_requested:
+                self.unreadable_files += 1
             if completed % 100 == 0:
                 callback('progress', {'current': completed, 'total': len(files_to_filter), 'phase': 'prefix_filter'})
 
@@ -647,6 +655,8 @@ class Scanner:
                 return self._sorted_groups(exact_results)
             if file_hash:
                 full_hash_groups[file_hash].append(filepath)
+            elif not self.cancel_requested:
+                self.unreadable_files += 1
             if completed % 100 == 0:
                 callback('progress', {'current': completed, 'total': len(files_to_hash), 'phase': 'exact'})
 
@@ -663,6 +673,8 @@ class Scanner:
                 return []
             if phash:
                 phash_dict[phash].append(filepath)
+            elif not self.cancel_requested:
+                self.unreadable_files += 1
             if completed % 100 == 0:
                 callback('progress', {'current': completed, 'total': self.total_files, 'phase': 'similar'})
 

@@ -473,6 +473,11 @@ async function pollStatus(mode, failures = 0) {
         if (skipped > 0) {
             postMsg += (postMsg ? ' ' : '') + `(${skipped} file(s) skipped due to path length)`;
         }
+        // Locked by another program or failing to decode: left out of the results.
+        const unreadable = data.results.unreadable_files || 0;
+        if (unreadable > 0) {
+            postMsg += (postMsg ? ' ' : '') + `(${unreadable} file(s) could not be read)`;
+        }
         if (postMsg) {
             statusText.textContent = postMsg;
             progressBar.style.width = '0%';

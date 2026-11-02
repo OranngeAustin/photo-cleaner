@@ -1045,6 +1045,20 @@ function flakyStatusFetch(requests, failuresBeforeDone) {
     };
 }
 
+test('the post-scan message reports files the scan could not read', async () => {
+    const runtime = createRuntime(async url => {
+        if (url === '/api/scan') return { ok: true, json: async () => ({ status: 'started' }) };
+        const results = { exact: [['a1.jpg', 'a2.jpg']], similar: [], skipped_files: 0, unreadable_files: 2 };
+        return { ok: true, json: async () => ({ done: true, message: '', progress: {}, cancelled: false, results }) };
+    });
+    runtime.window.pywebview = { api: { choose_directory: async () => '/photos' } };
+    runtime.elements.browseBtn.dispatch('click');
+    await flushPromises();
+
+    assert.equal(runtime.elements.statusText.textContent, '(2 file(s) could not be read)');
+    assert.equal(runtime.elements.statusBar.classList.contains('hidden'), false);
+});
+
 test('a single failed status poll retries instead of abandoning the scan', async () => {
     const requests = [];
     const runtime = createRuntime(flakyStatusFetch(requests, 1));

@@ -799,3 +799,26 @@ def test_closing_the_result_iterator_early_drops_queued_work():
 
     assert "d" not in started
     assert "e" not in started
+
+
+@pytest.mark.parametrize("mode", ["exact", "similar"])
+def test_a_scan_counts_files_it_could_not_read(tmp_path, monkeypatch, mode):
+    """W04: a file another program holds open without sharing (or an image
+    that fails to decode) used to vanish from the results without a trace."""
+    for name in ("a.jpg", "b.jpg", "locked.jpg"):
+        create_image(tmp_path / name, color="red")
+    locked = str(tmp_path / "locked.jpg")
+    real_open = open
+
+    def open_unless_locked(file, *args, **kwargs):
+        if os.fspath(file) == locked:
+            raise PermissionError(13, "The file is being used by another process", locked)
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", open_unless_locked)
+    results = []
+    Scanner(max_workers=1).scan_directory(str(tmp_path), mode, lambda event, data: results.append((event, data)))
+
+    done = results[-1][1]
+    assert [[Path(path).name for path in group] for group in done[mode]] == [["a.jpg", "b.jpg"]]
+    assert done["unreadable_files"] == 1
