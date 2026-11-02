@@ -381,6 +381,36 @@ def test_enumeration_skips_junctions_that_lead_outside_the_scan_root(tmp_path):
     assert [os.path.realpath(path) for path in files] == [os.path.realpath(inside / "kept.jpg")]
 
 
+def test_enumeration_skips_the_recycle_bin_and_system_volume_information(tmp_path):
+    # W15: scanning a drive root used to list trashed copies next to the originals.
+    create_image(tmp_path / "a.jpg")
+    for name in ("$RECYCLE.BIN", "System Volume Information", "RECYCLER"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "copy.jpg").write_bytes((tmp_path / "a.jpg").read_bytes())
+
+    files, _, _ = Scanner()._enumerate_image_files(str(tmp_path), collect_sizes=False)
+
+    assert files == [str(tmp_path / "a.jpg")]
+
+
+def test_enumeration_skips_hidden_system_directories_but_not_merely_hidden_ones(tmp_path):
+    import subprocess
+    protected = tmp_path / "protected"
+    hidden = tmp_path / "hidden"
+    for directory in (protected, hidden):
+        directory.mkdir()
+        create_image(directory / "img.jpg")
+    try:
+        subprocess.run(["attrib", "+h", "+s", str(protected)], check=True, capture_output=True)
+        subprocess.run(["attrib", "+h", str(hidden)], check=True, capture_output=True)
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("Requires Windows file attributes")
+
+    files, _, _ = Scanner()._enumerate_image_files(str(tmp_path), collect_sizes=False)
+
+    assert files == [str(hidden / "img.jpg")]
+
+
 def _symlink_or_skip(link, target):
     try:
         os.symlink(target, link)

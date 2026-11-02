@@ -3,6 +3,7 @@ import io
 import logging
 import os
 import queue
+import stat
 import threading
 from bisect import bisect_right
 from collections import defaultdict
@@ -31,6 +32,12 @@ else:
 SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.jfif', '.png', '.bmp', '.webp', '.tif', '.tiff'}
 if HEIC_AVAILABLE:
     SUPPORTED_EXTENSIONS.update({'.heic', '.heif'})
+# Recycle bins and restore points: trashed copies would pair up with the
+# originals.  Compared in lower case.
+SKIPPED_DIRECTORY_NAMES = frozenset({'$recycle.bin', 'recycler', 'system volume information'})
+# Directories that are both hidden and system are protected OS folders; merely
+# hidden ones may well hold the user's photos.
+_HIDDEN_SYSTEM = stat.FILE_ATTRIBUTE_HIDDEN | stat.FILE_ATTRIBUTE_SYSTEM
 HASH_CHUNK_SIZE = 256 * 1024
 PREFIX_HASH_SIZE = 64 * 1024
 SIMILARITY_THRESHOLD = 5
@@ -263,6 +270,19 @@ def generate_thumbnail(image_path: str, max_size: tuple[int, int] = (256, 256)) 
     except Exception:
         logger.warning("Failed to generate thumbnail: %s", image_path, exc_info=True)
         return b""
+
+
+def _is_system_directory(entry: os.DirEntry) -> bool:
+    if entry.name.lower() in SKIPPED_DIRECTORY_NAMES:
+        return True
+    if os.name != "nt":
+        return False
+    try:
+        # On Windows the attributes come from the directory listing; no extra call.
+        attributes = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
+    except OSError:
+        return False
+    return attributes & _HIDDEN_SYSTEM == _HIDDEN_SYSTEM
 
 
 def _is_within(path: str, root_key: str) -> bool:
@@ -551,6 +571,9 @@ class Scanner:
                             # or deleted, and one pointing at an ancestor would scan
                             # that whole tree.  (DirEntry.is_junction is new in 3.12.)
                             if entry.is_dir(follow_symlinks=False):
+                                if _is_system_directory(entry):
+                                    logger.debug("Skipping system directory: %s", entry.path)
+                                    continue
                                 if getattr(entry, "is_junction", lambda: False)() and not _is_within(
                                     entry.path, root_key
                                 ):
