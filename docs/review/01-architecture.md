@@ -101,3 +101,14 @@ ImageHash 4.3.2、Send2Trash 2.1.0、pywebview 6.2.1。
 4. **`tests/`**：测试是否真正覆盖上述高风险路径、是否有平台相关或脆弱的测试。
 5. **根目录配置与打包**：`requirements.txt`（版本锁定）、`Start_PhotoCleaner.bat`、`.gitignore`。
 6. **`docs/`、`.claude/`**：只读文档，仅检查是否与代码不一致。
+
+## 第二轮（M1–M11 修复后）新增的防护
+
+| 位置 | 机制 | 对应发现 |
+|---|---|---|
+| `main.py` `LocalRequestGuard` | 中间件栈的最外层：`Host` 必须是 `127.0.0.1` 或 `localhost`；如果带 `Origin`，必须等于 `http://<Host>`；否则返回 403。作用于所有 HTTP 请求，包括静态文件 | M11、L14 |
+| `main.py` `result_fingerprints_by_mode` | 扫描结束时记录每个结果的 `(size, mtime_ns)`，`/api/delete` 删除前比对，不一致就拒绝；换根目录时清空，删除成功后移除 | M8 |
+| `backend/scanner.py` `_decode_budget` | 所有线程同时解码的像素总量上限（pHash、非 JPEG 缩略图、按 draft 缩小后的 JPEG）；超大图独占预算；扫描任务在等待中会响应取消 | M7 |
+| `backend/scanner.py` `get_file_prefix_hash_and_size` | 前缀哈希附带同一句柄上的 `fstat` 大小；大小变化的组不能只凭前缀判定 | M1 |
+| `web/script.js` `commitPendingDeletion` | 返回进行中的请求；切标签自动扫描和换目录之前都会等它完成 | M6 |
+| `web/script.js` `moveFocusOffHiddenRows` / `restoreFocusAfterUndo` / `focusFirstVisibleRow` | 键盘焦点在暂存、撤销、失败、切换标签之后始终有效 | M4、M5 |
