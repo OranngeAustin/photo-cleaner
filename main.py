@@ -81,6 +81,7 @@ app = FastAPI()
 app.add_middleware(LocalRequestGuard)
 thumbnail_scanner = Scanner()
 scan_lock = threading.Lock()
+SCAN_FAILED_MESSAGE = "Scan failed. Check the application log for details."
 active_scanner: Scanner | None = None
 allowed_scan_root: str | None = None
 allowed_result_paths_by_mode: dict[str, set[str]] = {
@@ -315,11 +316,24 @@ def start_scan(req: ScanRequest):
                 active_scanner = None
                 scan_state["done"] = True  # Frontend treats this as an atomic completion marker.
 
-    threading.Thread(
-        target=scan_job.scan_directory,
-        args=(scan_root, req.mode, callback),
-        daemon=True,
-    ).start()
+    def run_scan() -> None:
+        global active_scanner
+        try:
+            scan_job.scan_directory(scan_root, req.mode, callback)
+        finally:
+            # The scanner always reports done, but if handling that report
+            # failed, release the job here: otherwise every later scan is
+            # refused with 409 until the app restarts.
+            with scan_lock:
+                if active_scanner is scan_job:
+                    active_scanner = None
+                    scan_state["results"] = {"exact": [], "similar": [], "error": SCAN_FAILED_MESSAGE}
+                    scan_state["message"] = SCAN_FAILED_MESSAGE
+                    scan_state["cancelled"] = False
+                    scan_state["status"] = "idle"
+                    scan_state["done"] = True
+
+    threading.Thread(target=run_scan, daemon=True).start()
     return {"status": "started"}
 
 

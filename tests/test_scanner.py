@@ -720,3 +720,22 @@ def test_a_failed_thumbnail_is_retried_on_the_next_request(tmp_path, monkeypatch
 
     assert len(opened) == 2
     assert Image.open(io.BytesIO(retried)).format == "JPEG"
+
+
+def test_done_is_reported_once_even_when_the_callback_keeps_failing(tmp_path):
+    """L3: a failing done callback was caught by the scan's own error handler,
+    which sent a second done; when that failed too, the exception escaped and
+    ended the scan thread."""
+    create_image(tmp_path / "a.jpg")
+    events = []
+
+    def callback(event, data):
+        events.append(event)
+        if event == "done":
+            raise RuntimeError("callback failed")
+
+    scanner = Scanner()
+    scanner.scan_directory(str(tmp_path), "exact", callback)
+
+    assert events.count("done") == 1
+    assert scanner.is_scanning is False

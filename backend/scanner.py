@@ -424,8 +424,16 @@ class Scanner:
                     submit_next()
 
     def _finish(self, callback: Callable[[str, Dict], None], data: Dict) -> None:
+        """Report done exactly once.
+
+        A failing callback is logged here rather than reaching the scan's own
+        error handler, which would report a second done.
+        """
         self.is_scanning = False
-        callback('done', data)
+        try:
+            callback('done', data)
+        except Exception:
+            logger.exception("The scan completion callback failed")
 
     def scan_directory(self, root_dir: str, mode: str, callback: Callable[[str, Dict], None]) -> None:
         """Scan a directory for exact duplicates or visually similar photos."""
