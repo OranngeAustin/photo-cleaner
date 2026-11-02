@@ -787,3 +787,41 @@ test('a group the user deliberately left unselected keeps its selection state af
         [false, false]
     );
 });
+
+function renderExactRowsForDelete(runtime) {
+    const groups = [['a1.jpg', 'a2.jpg'], ['b1.jpg', 'b2.jpg'], ['c1.jpg', 'c2.jpg', 'c3.jpg']];
+    runtime.api.setExactData(groups);
+    runtime.api.renderList(groups, runtime.elements.exactList, 'exact');
+    return runtime.elements.exactList.children;
+}
+
+test('the Delete key cleans the focused group, not the first group on screen', () => {
+    const runtime = createRuntime(async () => ({ ok: true, json: async () => ({}) }));
+    const rows = renderExactRowsForDelete(runtime);
+    // Clicking c2 keeps c1 and c2 selected and moves keyboard focus to the third group.
+    rows[2].querySelectorAll('.image-item')[1].dispatch('click');
+
+    runtime.document.dispatch('keydown', { key: 'Delete' });
+
+    const pending = runtime.api.getPendingDeletion();
+    assert.equal(pending.rows[0].id, rows[2].id);
+    assert.deepEqual(pending.paths, ['c3.jpg']);
+    assert.equal(rows[0].style.display, undefined);
+});
+
+test('when focus is scrolled away, Delete ignores groups hidden under the header', () => {
+    const runtime = createRuntime(async () => ({ ok: true, json: async () => ({}) }));
+    const rows = renderExactRowsForDelete(runtime);
+    rows[2].querySelectorAll('.image-item')[1].dispatch('click');
+    // The list scrolls inside #scroll-container, which starts below a 146px header.
+    runtime.elements.scrollContainer._rect = { top: 146, bottom: 800 };
+    rows[0]._rect = { top: -60, bottom: 120 };   // scrolled entirely behind the header
+    rows[1]._rect = { top: 130, bottom: 330 };   // first group the user can see
+    rows[2]._rect = { top: 900, bottom: 1100 };  // focused group, scrolled off screen
+
+    runtime.document.dispatch('keydown', { key: 'Delete' });
+
+    const pending = runtime.api.getPendingDeletion();
+    assert.equal(pending.rows[0].id, rows[1].id);
+    assert.deepEqual(pending.paths, ['b2.jpg']);
+});
