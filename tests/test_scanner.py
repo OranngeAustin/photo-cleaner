@@ -3,6 +3,7 @@ import os
 import random
 import sys
 import threading
+import time
 import unittest.mock
 import warnings
 import pytest
@@ -739,3 +740,25 @@ def test_done_is_reported_once_even_when_the_callback_keeps_failing(tmp_path):
 
     assert events.count("done") == 1
     assert scanner.is_scanning is False
+
+
+def test_closing_the_result_iterator_early_drops_queued_work():
+    """L4: when the consumer stops early for a reason other than cancel (an
+    exception in its loop body, a break), queued files must not still be
+    processed while the executor shuts down."""
+    started = []
+
+    def worker(path, cancel_event):
+        started.append(path)
+        if path != "a":
+            time.sleep(0.3)
+        return path
+
+    scanner = Scanner(max_workers=2)
+    results = scanner._iter_parallel_results(["a", "b", "c", "d", "e"], worker)
+    assert next(results) == ("a", "a")
+
+    results.close()
+
+    assert "d" not in started
+    assert "e" not in started

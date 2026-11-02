@@ -406,22 +406,27 @@ class Scanner:
             for _ in range(min(max_in_flight, len(filepaths))):
                 submit_next()
 
-            while pending:
-                if self.cancel_requested:
-                    for future in pending:
-                        future.cancel()
-                    return
+            try:
+                while pending:
+                    if self.cancel_requested:
+                        return
 
-                future = finished.get()
-                filepath = pending.pop(future)
-                try:
-                    result = future.result()
-                except Exception:
-                    logger.warning("Worker failed for file: %s", filepath, exc_info=True)
-                    result = ""
-                yield filepath, result
-                if not self.cancel_requested:
-                    submit_next()
+                    future = finished.get()
+                    filepath = pending.pop(future)
+                    try:
+                        result = future.result()
+                    except Exception:
+                        logger.warning("Worker failed for file: %s", filepath, exc_info=True)
+                        result = ""
+                    yield filepath, result
+                    if not self.cancel_requested:
+                        submit_next()
+            finally:
+                # However the loop ends (cancel, an exception in the consumer,
+                # or the consumer closing this generator early), drop queued
+                # work so leaving the executor waits only for running workers.
+                for future in pending:
+                    future.cancel()
 
     def _finish(self, callback: Callable[[str, Dict], None], data: Dict) -> None:
         """Report done exactly once.
