@@ -526,6 +526,8 @@ class Scanner:
                         try:
                             # Match os.walk(..., followlinks=False): traverse regular
                             # directories but do not descend into symlink directories.
+                            # Windows junctions are not symlinks here, so they are
+                            # followed; seen_realpaths stops junction loops.
                             if entry.is_dir(follow_symlinks=False):
                                 stack.append(entry.path)
                                 continue
