@@ -1,6 +1,8 @@
 import io
 import os
+import random
 import sys
+import threading
 import unittest.mock
 import warnings
 import pytest
@@ -289,3 +291,85 @@ def test_exact_scan_does_not_pair_a_file_symlink_with_its_target(tmp_path):
 
     assert files == [str(target)]
     assert results[-1][1]["exact"] == []
+
+
+def _reference_anchor_clusters(phash_dict, threshold, cancel_at=None):
+    """Brute-force O(K^2) statement of the anchor (non-transitive) semantics.
+
+    ``cancel_at`` mirrors a cancellation observed at that anchor: earlier
+    anchors complete, that anchor keeps only its own paths, and nothing follows.
+    """
+    keys = list(phash_dict)
+    values = [int(key, 16) for key in keys]
+    visited = set()
+    groups = []
+    for index, key in enumerate(keys):
+        if cancel_at is not None and index > cancel_at:
+            break
+        if key in visited:
+            continue
+        visited.add(key)
+        group = list(phash_dict[key])
+        if cancel_at is None or index < cancel_at:
+            for other_index in range(index + 1, len(keys)):
+                other_key = keys[other_index]
+                if other_key not in visited and (values[index] ^ values[other_index]).bit_count() <= threshold:
+                    group.extend(phash_dict[other_key])
+                    visited.add(other_key)
+        if len(group) > 1:
+            groups.append(group)
+    return groups
+
+
+def _random_clustered_phash_dict(seed, unique_hashes=600):
+    rng = random.Random(seed)
+    values = set()
+    while len(values) < unique_hashes:
+        if values and rng.random() < 0.6:
+            value = rng.choice(sorted(values))
+            for _ in range(rng.randint(1, 8)):
+                value ^= 1 << rng.randrange(64)
+        else:
+            value = rng.getrandbits(64)
+        values.add(value)
+    ordered = sorted(f"{value:016x}" for value in values)
+    return {
+        key: [f"{index:04d}-{copy}.jpg" for copy in range(rng.choice((1, 1, 1, 2)))]
+        for index, key in enumerate(ordered)
+    }
+
+
+@pytest.mark.parametrize("threshold", range(0, 9))
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_cluster_matches_brute_force_anchor_reference(seed, threshold):
+    phash_dict = _random_clustered_phash_dict(seed)
+    assert cluster_similar_hashes(phash_dict, threshold=threshold) == _reference_anchor_clusters(
+        phash_dict, threshold
+    )
+
+
+def test_cluster_reports_progress_every_hundred_hashes():
+    phash_dict = _random_clustered_phash_dict(4, unique_hashes=250)
+    calls = []
+    cluster_similar_hashes(phash_dict, progress_callback=lambda current, total: calls.append((current, total)))
+    assert calls == [(0, 250), (100, 250), (200, 250)]
+
+
+def test_cluster_returns_nothing_when_cancelled_before_start():
+    cancel_event = threading.Event()
+    cancel_event.set()
+    assert cluster_similar_hashes(_random_clustered_phash_dict(5), cancel_event=cancel_event) == []
+
+
+def test_cluster_cancelled_from_progress_keeps_only_completed_anchor_groups():
+    phash_dict = _random_clustered_phash_dict(6, unique_hashes=300)
+    cancel_event = threading.Event()
+
+    def cancel_at_second_report(current, _total):
+        if current == 100:
+            cancel_event.set()
+
+    result = cluster_similar_hashes(
+        phash_dict, cancel_event=cancel_event, progress_callback=cancel_at_second_report
+    )
+    assert result == _reference_anchor_clusters(phash_dict, 5, cancel_at=100)
