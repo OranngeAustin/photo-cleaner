@@ -2,6 +2,8 @@
 
 执行手册：[RUNBOOK.md](RUNBOOK.md)　工作分支：`claude/review-fixes`（从 `main` @ `c8a8e5c` 创建）
 
+> 第二轮（修复中风险 M1–M11）的进度见文末[「第二轮」](#第二轮修复中风险-m1m11)。
+
 ## 阶段清单
 
 | 阶段 | 内容 | 状态 | 备注 |
@@ -72,3 +74,39 @@ Pillow 12.3.0、pillow-heif 1.8.1、ImageHash 4.3.2、Send2Trash 2.1.0、pywebvi
 - 执行结束后，用户明确要求合并 #5、#6、#7（Q1 暂不处理），这三个 PR 已合并进 `claude/review-fixes`，合并方式为 merge commit：
   #5 → `a425b7b`，#6 → `7096e77`，#7 → `c10cdb5`。合并后 Python 57 项（56 项通过，1 项为已有的失败），Node 23 项全部通过；
   README 和 CLAUDE.md 中的测试基线同步改为 Python 57 项。#4（→ `main`）仍处于打开状态，未合并。
+
+---
+
+## 第二轮：修复中风险 M1–M11
+
+用户目标：从 `claude/review-fixes` 创建 `claude/medium-fixes`，修复 M1–M11，按 RUNBOOK 再走一遍阶段 0–7。
+代码分支：`claude/medium-fixes`（从 `claude/review-fixes` @ `4db7895` 创建）；审查文档仍提交到 `claude/review-fixes`。
+
+| 阶段 | 内容 | 状态 | 备注 |
+|---|---|---|---|
+| 0 | 准备：基线测试、基准、分支、清单 | ✅ 完成 | 见下方「第二轮基线」 |
+| 1 | 架构摸底（增量复核 `01-architecture.md`） | ⏳ 待做 | |
+| 2 | 代码审查：在当前代码上复核 M1–M11 | ⏳ 待做 | |
+| 3 | 安全审计：复核 M11，重跑 pip-audit | ⏳ 待做 | |
+| 4 | 修复 M1–M11（每项 1 个 commit + 测试）+ PR → `claude/review-fixes` | ⏳ 待做 | |
+| 5 | 性能分析：修复前后基准对比 | ⏳ 待做 | |
+| 6 | 算法优化 | ⏳ 待做 | |
+| 7 | 总结：更新 `00-SUMMARY.md` | ⏳ 待做 | |
+
+### 第二轮基线（`claude/medium-fixes` @ `4db7895`）
+
+| 测试套件 | 结果 |
+|---|---|
+| Python `python -m pytest -q` | **56 passed, 1 failed**（57 项；失败的是已有的 `test_scan_directory_symlink_cycle`，即 M9 本身） |
+| 前端 `node --test tests/test_frontend.js` | **23 passed, 0 failed** |
+| 基准 | `exact`、`phash`、`thumbnail`、`result_keys`、`parallel` 各 5 次取中位数，结果写在阶段 5 |
+
+判定标准：Python 失败数不超过 1，且只能是上面那一条（修好 M9 后应为 0）；前端失败数为 0。
+
+### 第二轮决策记录
+
+- **R2-D1 分支与文档的分工**：代码和测试只提交到 `claude/medium-fixes`，审查文档（PROGRESS、02-findings、
+  03-perf-plan、00-SUMMARY）只提交到 `claude/review-fixes`。两条分支不改同一个文件，以后合并 PR 时不会冲突；
+  同时满足目标里「00-SUMMARY.md 在 `claude/review-fixes` 上」的要求。README 和 CLAUDE.md 里的测试基线随代码一起改，放在 `claude/medium-fixes`。
+- **R2-D2 PR 目标分支**：RUNBOOK 阶段 4 写的是「创建指向 main 的 PR」，但 `claude/medium-fixes` 是从 `claude/review-fixes` 拉出来的，
+  直接指向 `main` 会把 #4 的全部内容重复带进来。所以 PR 指向 `claude/review-fixes`，等 #4 合并后再一起进入 `main`。不合并任何 PR。
