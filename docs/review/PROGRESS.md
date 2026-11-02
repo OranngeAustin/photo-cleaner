@@ -17,6 +17,21 @@
 | 6 | 算法优化（前 3 项，各自 `claude/perf-*` 分支 + PR → review-fixes） | ✅ 完成 | 6.1 聚类 [PR #5](https://github.com/OranngeAustin/photo-cleaner/pull/5) −69%；6.2 结果路径白名单 [PR #6](https://github.com/OranngeAustin/photo-cleaner/pull/6) −58%；6.3 并行调度 [PR #7](https://github.com/OranngeAustin/photo-cleaner/pull/7) −9%（3 种方案均未达 20%，按规则保留最好的正确版本） |
 | 7 | 总结 → `00-SUMMARY.md` | ✅ 完成 | 见 [00-SUMMARY.md](00-SUMMARY.md) |
 
+## 合并记录（最新）
+
+三轮执行期间都没有合并 PR。之后按用户的明确要求合并：
+
+| PR | 合并到 | 合并 commit | 说明 |
+|---|---|---|---|
+| #5、#6、#7 | `claude/review-fixes` | `a425b7b`、`7096e77`、`c10cdb5` | 第一轮结束后，用户要求合并 |
+| [#4](https://github.com/OranngeAustin/photo-cleaner/pull/4) | `main` | `cb46f1a` | 第三轮结束后，用户要求按 review-fixes → perf → medium-fixes → low-fixes 的顺序合并 |
+| [#8](https://github.com/OranngeAustin/photo-cleaner/pull/8) | `main` | `7b9faa9` | 目标原为 `claude/review-fixes`，合并前改为 `main` |
+| [#9](https://github.com/OranngeAustin/photo-cleaner/pull/9) | `main` | `b077a6b` | 目标原为 `claude/medium-fixes`，合并前改为 `main` |
+
+- 合并前先在本地模拟了同样的合并顺序：三次合并都没有冲突，结果与最终的 `main` 文件树一致。在 `main` 上测试：Python 93 项通过、1 项跳过，Node 40 项通过。
+- 合并方式都是 merge commit。用户中途发来「不合并到 main」时，三个 PR 已经合并完毕；随后用户确认「最新版都合并进 main」，所以保持现状。
+- 所有远端分支的内容都已包含在 `main` 中；没有删除任何分支。
+
 ## 第三轮：修复低风险 L1–L13（分支 `claude/low-fixes`）
 
 从 `claude/medium-fixes` @ `b916739` 创建，PR 目标为 `claude/medium-fixes`。本轮只遵守 RUNBOOK 的「工作规则」：
@@ -63,6 +78,7 @@
 - 测试：Python 由 86 passed / 1 skipped 变为 **93 passed / 1 skipped**；Node 由 32 变为 **40 passed**。
   除 L5、L11、L12 外，每项都先写测试并确认修复前失败；没有修改或删除任何已有测试的断言。
 - 分支 `claude/low-fixes` 已推送，PR 目标为 `claude/medium-fixes`。未推送 `main`，未 force push，未合并任何 PR，未删除分支。
+- 之后按用户要求，[PR #9](https://github.com/OranngeAustin/photo-cleaner/pull/9) 的目标改为 `main` 并合并（`b077a6b`），见「合并记录」。
 
 ## 阶段 0：基线
 
@@ -120,7 +136,7 @@ Pillow 12.3.0、pillow-heif 1.8.1、ImageHash 4.3.2、Send2Trash 2.1.0、pywebvi
 - RUNBOOK 执行期间：未推送 `main`，未 force push，未合并任何 PR，未删除任何远端分支。
 - 执行结束后，用户明确要求合并 #5、#6、#7（Q1 暂不处理），这三个 PR 已合并进 `claude/review-fixes`，合并方式为 merge commit：
   #5 → `a425b7b`，#6 → `7096e77`，#7 → `c10cdb5`。合并后 Python 57 项（56 项通过，1 项为已有的失败），Node 23 项全部通过；
-  README 和 CLAUDE.md 中的测试基线同步改为 Python 57 项。#4（→ `main`）仍处于打开状态，未合并。
+  README 和 CLAUDE.md 中的测试基线同步改为 Python 57 项。#4（→ `main`）仍处于打开状态，未合并（之后已合并，见「合并记录」）。
 
 ---
 
@@ -209,5 +225,5 @@ Pillow 12.3.0、pillow-heif 1.8.1、ImageHash 4.3.2、Send2Trash 2.1.0、pywebvi
 ### 第二轮结束状态
 
 - 推送到远端的分支：`claude/medium-fixes`（代码和测试）、`claude/review-fixes`（审查文档）。
-- 新建 [PR #8](https://github.com/OranngeAustin/photo-cleaner/pull/8)：`claude/medium-fixes` → `claude/review-fixes`，未合并。
+- 新建 [PR #8](https://github.com/OranngeAustin/photo-cleaner/pull/8)：`claude/medium-fixes` → `claude/review-fixes`，未合并（之后目标改为 `main` 并合并，见「合并记录」）。
 - 未推送 `main`，未 force push，未合并任何 PR，未删除任何分支。本地的临时 worktree（用于 A/B 对比和文档提交）不是分支，用完即清理。

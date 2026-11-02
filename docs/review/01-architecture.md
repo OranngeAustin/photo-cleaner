@@ -109,6 +109,20 @@ ImageHash 4.3.2、Send2Trash 2.1.0、pywebview 6.2.1。
 | `main.py` `LocalRequestGuard` | 中间件栈的最外层：`Host` 必须是 `127.0.0.1` 或 `localhost`；如果带 `Origin`，必须等于 `http://<Host>`；否则返回 403。作用于所有 HTTP 请求，包括静态文件 | M11、L14 |
 | `main.py` `result_fingerprints_by_mode` | 扫描结束时记录每个结果的 `(size, mtime_ns)`，`/api/delete` 删除前比对，不一致就拒绝；换根目录时清空，删除成功后移除 | M8 |
 | `backend/scanner.py` `_decode_budget` | 所有线程同时解码的像素总量上限（pHash、非 JPEG 缩略图、按 draft 缩小后的 JPEG）；超大图独占预算；扫描任务在等待中会响应取消 | M7 |
-| `backend/scanner.py` `get_file_prefix_hash_and_size` | 前缀哈希附带同一句柄上的 `fstat` 大小；大小变化的组不能只凭前缀判定 | M1 |
+| `backend/scanner.py` `get_file_prefix_hash_and_length` | 读前缀时多读 1 个字节，返回实际读到的长度；长度与枚举时的大小不一致的组，不能只凭前缀判定（最初用 `fstat`，因为造成 +6.5% 的回归，改成了现在的做法） | M1 |
 | `web/script.js` `commitPendingDeletion` | 返回进行中的请求；切标签自动扫描和换目录之前都会等它完成 | M6 |
 | `web/script.js` `moveFocusOffHiddenRows` / `restoreFocusAfterUndo` / `focusFirstVisibleRow` | 键盘焦点在暂存、撤销、失败、切换标签之后始终有效 | M4、M5 |
+
+## 第三轮（L1–L13 修复后）的变化
+
+| 位置 | 机制 | 对应发现 |
+|---|---|---|
+| `main.py` `start_scan` 中的 `run_scan` | 扫描线程入口用 `finally` 兜底：如果处理 `done` 失败、任务仍是 `active_scanner`，就释放它，并把状态设为带错误信息的 `done`，避免之后的扫描一律返回 409 | L3 |
+| `main.py` `delete_files` | 删除后不再清空缩略图缓存；`_path_key` 在 `scan_lock` 之外计算 | L8、L1 |
+| `backend/scanner.py` `_finish` | 回调异常只记录日志，`done` 只发一次 | L3 |
+| `backend/scanner.py` `_iter_parallel_results` | 无论循环以哪种方式结束，都在 `finally` 中取消排队中的任务 | L4 |
+| `backend/scanner.py` `generate_thumbnail` | 生成失败的异常不进入 `lru_cache`，由外层返回空结果 | L2 |
+| `web/script.js` `retryOrAbandonScan` | 状态轮询按 0.5/1/2/4 秒退避重试；放弃时请求 `/api/cancel_scan` | L7 |
+| `web/script.js` `stageDeletion` | 所有清理动作的唯一入口；撤销窗口内的新动作并入同一批 | L9、L11 |
+| `web/script.js` `showToast({ undoable })` / `hideToastLater` | 提交中和结果提示不显示 Undo；结果提示 5 秒后自动隐藏，不会隐藏更新的提示 | L10 |
+| `requirements.lock` | 可选的 constraints 文件，记录测试通过时的确切版本；`requirements.txt` 不变 | L13 |
