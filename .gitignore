@@ -16,3 +16,6 @@ release/
 # Editor settings
 .vscode/
 .idea/
+
+# Local test photos and generated Windows fixtures (docs/review/04-windows-handoff.md)
+photo-test/
