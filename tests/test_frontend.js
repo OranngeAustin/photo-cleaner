@@ -1136,3 +1136,47 @@ test('exact auto dedup keeps a group already waiting in the undo window', async 
 
     assert.deepEqual(requests, [['a2.jpg', 'b2.jpg', 'c2.jpg', 'c3.jpg']]);
 });
+
+test('while a delete is being committed the toast no longer offers Undo', async () => {
+    let release;
+    const runtime = createRuntime(() => new Promise(resolve => {
+        release = () => resolve({ ok: true, json: async () => ({ deleted: ['a2.jpg'], errors: [] }) });
+    }));
+    renderExactRowsForDelete(runtime);
+    runtime.elements.exactList.querySelectorAll('.clean-btn')[0].dispatch('click');
+    assert.notEqual(runtime.elements.toastUndo.style.display, 'none');
+
+    const commit = runtime.api.commitPendingDeletion();
+    assert.equal(runtime.elements.toastUndo.style.display, 'none');
+    assert.match(runtime.elements.toastMessage.textContent, /Recycle Bin/);
+
+    release();
+    await commit;
+    assert.equal(runtime.elements.toastContainer.classList.contains('show'), false);
+});
+
+test('a failed delete message has no Undo and hides itself unless a newer toast replaced it', async () => {
+    const runtime = createRuntime(async () => {
+        throw new Error('offline');
+    });
+    renderExactRowsForDelete(runtime);
+    runtime.elements.exactList.querySelectorAll('.clean-btn')[0].dispatch('click');
+    await runtime.api.commitPendingDeletion();
+
+    assert.match(runtime.elements.toastMessage.textContent, /^⚠ Delete failed/);
+    assert.equal(runtime.elements.toastUndo.style.display, 'none');
+    const hideTimer = runtime.scheduledCallbacks.filter(entry => entry.delay === 5000).at(-1);
+    assert.ok(hideTimer);
+    hideTimer.callback();
+    assert.equal(runtime.elements.toastContainer.classList.contains('show'), false);
+
+    // A failure message timer must not hide a newer undo toast.
+    await runtime.api.commitPendingDeletion();
+    runtime.elements.exactList.querySelectorAll('.clean-btn')[0].dispatch('click');
+    await runtime.api.commitPendingDeletion();
+    const olderTimer = runtime.scheduledCallbacks.filter(entry => entry.delay === 5000).at(-1);
+    runtime.elements.exactList.querySelectorAll('.clean-btn')[0].dispatch('click');
+    olderTimer.callback();
+    assert.equal(runtime.elements.toastContainer.classList.contains('show'), true);
+    assert.notEqual(runtime.elements.toastUndo.style.display, 'none');
+});

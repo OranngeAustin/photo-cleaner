@@ -663,6 +663,7 @@ function commitPendingDeletion() {
     if (!deletion.committing) {
         clearTimeout(deletion.timerId);
         deletion.committing = true;
+        showToast(`Moving ${deletion.paths.length} photo(s) to the Recycle Bin\u2026`, { undoable: false });
         deletion.request = sendPendingDeletion(deletion);
     }
     return deletion.request || Promise.resolve();
@@ -694,14 +695,20 @@ async function sendPendingDeletion(deletion) {
 
         const failedCount = deletion.paths.filter(path => !deletedPaths.has(path)).length;
         if (failedCount > 0) {
-            showToast(`\u26A0 ${failedCount} file(s) could not be deleted. They remain visible.`);
+            hideToastLater(showToast(
+                `\u26A0 ${failedCount} file(s) could not be deleted. They remain visible.`,
+                { undoable: false }
+            ));
         } else {
             hideToast();
         }
     } catch (error) {
         restorePendingDeletion(deletion);
         restoreFocusAfterUndo(deletion);
-        showToast('\u26A0 Delete failed. The photos remain visible and can be retried.');
+        hideToastLater(showToast(
+            '\u26A0 Delete failed. The photos remain visible and can be retried.',
+            { undoable: false }
+        ));
     } finally {
         if (pendingDeletion === deletion) {
             pendingDeletion = null;
@@ -720,16 +727,31 @@ function undoPendingDeletion() {
     hideToast();
 }
 
-function showToast(message) {
+const toastUndoBtn = document.getElementById('toast-undo-btn');
+let toastId = 0;
+
+// Undo is offered only while a staged delete is still waiting; once the
+// request is on its way, or for a result message, the button does nothing.
+function showToast(message, { undoable = true } = {}) {
+    toastId += 1;
     document.getElementById('toast-msg').textContent = message;
+    toastUndoBtn.style.display = undoable ? '' : 'none';
     document.getElementById('toast-container').classList.add('show');
+    return toastId;
+}
+
+// Hide a result message after a while, unless a newer toast replaced it.
+function hideToastLater(id) {
+    setTimeout(() => {
+        if (toastId === id) hideToast();
+    }, 5000);
 }
 
 function hideToast() {
     document.getElementById('toast-container').classList.remove('show');
 }
 
-document.getElementById('toast-undo-btn').addEventListener('click', undoPendingDeletion);
+toastUndoBtn.addEventListener('click', undoPendingDeletion);
 
 function triggerClean(tabName, rIdx) {
     if (scanInProgress || pendingDeletion?.committing) return;
