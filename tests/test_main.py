@@ -466,3 +466,32 @@ def test_a_scan_whose_completion_handling_fails_does_not_block_later_scans(tmp_p
     finally:
         _restore_scan_state(saved_state)
         main.result_fingerprints_by_mode = saved_fingerprints
+
+
+def test_deleting_a_file_keeps_the_other_cached_thumbnails(tmp_path, monkeypatch):
+    """L8: the thumbnail cache key already includes each file's size and mtime,
+    so a delete need not make every visible thumbnail render again."""
+    from backend import scanner as scanner_module
+
+    saved_state = _save_scan_state()
+    try:
+        kept = tmp_path / "kept.jpg"
+        removed = tmp_path / "removed.jpg"
+        Image.new("RGB", (64, 64), "red").save(kept)
+        Image.new("RGB", (64, 64), "blue").save(removed)
+        with main.scan_lock:
+            main.allowed_scan_root = main._resolve_path(str(tmp_path))
+            main.allowed_result_paths_by_mode = {
+                "exact": {main._path_key(str(kept)), main._path_key(str(removed))},
+                "similar": set(),
+            }
+        scanner_module.clear_thumbnail_cache()
+        assert main.get_thumbnail(str(kept)).status_code == 200
+
+        monkeypatch.setattr(main, "send2trash", lambda path: None)
+        assert main.delete_files(main.DeleteRequest(files=[str(removed)]))["deleted"] == [str(removed)]
+        assert main.get_thumbnail(str(kept)).status_code == 200
+
+        assert scanner_module._generate_thumbnail_cached.cache_info().hits == 1
+    finally:
+        _restore_scan_state(saved_state)

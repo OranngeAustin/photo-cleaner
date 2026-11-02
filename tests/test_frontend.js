@@ -1086,3 +1086,21 @@ test('status polling gives up after repeated failures and cancels the backend sc
         ['POST']
     );
 });
+
+test('committing a delete keeps keyboard focus on the group the user was on', async () => {
+    const runtime = createRuntime(recordingDeleteFetch([]));
+    const groups = [['a1.jpg', 'a2.jpg'], ['b1.jpg', 'b2.jpg'], ['c1.jpg', 'c2.jpg'], ['d1.jpg', 'd2.jpg']];
+    runtime.api.setExactData(groups);
+    runtime.api.renderList(groups, runtime.elements.exactList, 'exact');
+    runtime.api.setFocus('exact', 2, 0);
+    runtime.document.dispatch('keydown', { key: 'Delete' });
+    runtime.document.dispatch('keydown', { key: 'd' });
+    assert.deepEqual(runtime.api.getFocus(), { rowIdx: 3, imgIdx: 1, tab: 'exact' });
+
+    await runtime.api.commitPendingDeletion();
+
+    // Group c is gone, so d2 is now in the third row: focus stays on it
+    // instead of jumping back to the top of the list.
+    assert.deepEqual(runtime.api.snapshot().exactData, [['a1.jpg', 'a2.jpg'], ['b1.jpg', 'b2.jpg'], ['d1.jpg', 'd2.jpg']]);
+    assert.deepEqual(runtime.api.getFocus(), { rowIdx: 2, imgIdx: 1, tab: 'exact' });
+});

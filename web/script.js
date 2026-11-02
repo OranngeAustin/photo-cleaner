@@ -602,9 +602,8 @@ function removeDeletedPaths(tabName, deletedPaths) {
         .map(item => item.dataset.path);
     const selectedPaths = new Set(previouslySelected.filter(path => !deletedPaths.has(path)));
     const lostSelections = new Set(previouslySelected.filter(path => deletedPaths.has(path)));
-    const updatedData = currentData
-        .map(group => group.filter(path => !deletedPaths.has(path)))
-        .filter(group => group.length > 1);
+    const survivingGroups = currentData.map(group => group.filter(path => !deletedPaths.has(path)));
+    const updatedData = survivingGroups.filter(group => group.length > 1);
 
     // A kept photo can be deleted from the other tab. Never leave such a group
     // with nothing selected, or the next clean would remove every remaining copy.
@@ -624,8 +623,15 @@ function removeDeletedPaths(tabName, deletedPaths) {
     renderList(updatedData, container, tabName, selectedPaths);
 
     if (currentFocus.tab === tabName) {
-        currentFocus = updatedData.length > 0
-            ? { rowIdx: 0, imgIdx: 0, tab: tabName }
+        // Stay on the focused photo's group, or the next group still listed,
+        // instead of jumping back to the top of the list.
+        const focusedPath = currentData[currentFocus.rowIdx]?.[currentFocus.imgIdx];
+        const groupsBefore = survivingGroups
+            .slice(0, Math.max(currentFocus.rowIdx, 0))
+            .filter(group => group.length > 1).length;
+        const rowIdx = Math.min(groupsBefore, updatedData.length - 1);
+        currentFocus = rowIdx >= 0
+            ? { rowIdx, imgIdx: Math.max(updatedData[rowIdx].indexOf(focusedPath), 0), tab: tabName }
             : { rowIdx: -1, imgIdx: -1, tab: tabName };
         updateFocusUI();
     }

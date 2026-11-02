@@ -385,8 +385,8 @@ def delete_files(req: DeleteRequest):
             logger.warning("Failed to delete file: %s", requested_path, exc_info=True)
             errors.append(requested_path)
 
-    if success:
-        clear_thumbnail_cache()
+    # The thumbnail cache is not cleared here: its key includes each file's
+    # size and mtime, and deleted paths are no longer allowed anyway.
     return {"deleted": success, "errors": errors}
 
 
