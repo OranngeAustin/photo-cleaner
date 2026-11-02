@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -281,3 +282,61 @@ def test_capture_time_is_unknown_for_a_decompression_bomb(tmp_path, monkeypatch)
     monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
 
     assert main._read_capture_time(str(photo)) is None
+
+
+def test_delete_refuses_a_file_changed_since_the_scan(tmp_path, monkeypatch):
+    # M8: a sync tool or editor can replace a result after the scan finished.
+    saved_state = _save_scan_state()
+    saved_fingerprints = {mode: dict(prints) for mode, prints in main.result_fingerprints_by_mode.items()}
+    try:
+        unchanged = tmp_path / "unchanged.jpg"
+        resized = tmp_path / "resized.jpg"
+        touched = tmp_path / "touched.jpg"
+        for path in (unchanged, resized, touched):
+            path.write_bytes(b"original")
+        results = {"exact": [[str(unchanged), str(resized), str(touched)]], "similar": []}
+        fingerprints = main._collect_result_fingerprints(results, "exact")
+        main.allowed_scan_root = str(tmp_path)
+        main.allowed_result_paths_by_mode = {"exact": set(fingerprints), "similar": set()}
+        main.result_fingerprints_by_mode = {"exact": fingerprints, "similar": {}}
+
+        resized.write_bytes(b"replaced with different content")
+        stat_result = touched.stat()
+        touched.write_bytes(b"ORIGINAL")  # same size, new content and mtime
+        os.utime(touched, ns=(stat_result.st_atime_ns, stat_result.st_mtime_ns + 5_000_000_000))
+        sent_to_trash = []
+        monkeypatch.setattr(main, "send2trash", sent_to_trash.append)
+
+        response = main.delete_files(main.DeleteRequest(files=[str(unchanged), str(resized), str(touched)]))
+
+        assert response == {"deleted": [str(unchanged)], "errors": [str(resized), str(touched)]}
+        assert sent_to_trash == [main._resolve_path(str(unchanged))]
+    finally:
+        _restore_scan_state(saved_state)
+        main.result_fingerprints_by_mode = saved_fingerprints
+
+
+def test_a_finished_scan_records_the_fingerprints_that_delete_checks(tmp_path, monkeypatch):
+    saved_state = _save_scan_state()
+    saved_fingerprints = {mode: dict(prints) for mode, prints in main.result_fingerprints_by_mode.items()}
+    try:
+        first = tmp_path / "a.jpg"
+        second = tmp_path / "b.jpg"
+        first.write_bytes(b"duplicate")
+        second.write_bytes(b"duplicate")
+        main.active_scanner = None
+        assert main.start_scan(main.ScanRequest(directory=str(tmp_path), mode="exact")) == {"status": "started"}
+        deadline = time.monotonic() + 10
+        while not main.scan_state["done"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert main.scan_state["results"]["exact"] == [[str(first), str(second)]]
+
+        second.write_bytes(b"edited after the scan")
+        sent_to_trash = []
+        monkeypatch.setattr(main, "send2trash", sent_to_trash.append)
+        response = main.delete_files(main.DeleteRequest(files=[str(first), str(second)]))
+
+        assert response == {"deleted": [str(first)], "errors": [str(second)]}
+    finally:
+        _restore_scan_state(saved_state)
+        main.result_fingerprints_by_mode = saved_fingerprints
