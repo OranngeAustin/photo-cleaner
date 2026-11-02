@@ -360,8 +360,9 @@ def delete_files(req: DeleteRequest):
                 continue
             send2trash(real_path)
             success.append(requested_path)
+            # Resolve before taking the lock: realpath touches the file system.
+            path_key = _path_key(real_path)
             with scan_lock:
-                path_key = _path_key(real_path)
                 for paths in allowed_result_paths_by_mode.values():
                     paths.discard(path_key)
                 for fingerprints in result_fingerprints_by_mode.values():
