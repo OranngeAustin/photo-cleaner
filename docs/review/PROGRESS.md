@@ -36,7 +36,7 @@
 | L9 | ✅ 已修复 |  | 采用「像相似页那样合并」：撤销窗口内的新清理动作并入待删除批次（路径和行去重，计时器重新计 3 秒），一次撤销全部恢复，焦点回到第一次清理前的位置；相似页批量清理统计待删除行时改为按行所属标签过滤 |
 | L10 | ✅ 已修复 |  | 开始提交时提示改为「正在移到回收站」并隐藏 Undo 按钮；部分失败和失败提示不带 Undo，5 秒后自动隐藏（被更新的提示替换时不隐藏） |
 | L11 | ✅ 已修复（部分不成立） |  | 删除未使用的 `activeCountdownId`、`countdownInterval`，删除从不读取的 `pendingDeletion.type`，删除无效规则 `.group-row.focused`；`triggerClean` 和批量清理改为共用 `stageDeletion`。**两处已不成立、未改**：`scrollContainer` 现在被 H4 的修复使用；`.lightbox img.zoomed` 有效（`setZoom` 会给图片加 `zoomed`） |
-| L12 | ⬜ 待处理 | | |
+| L12 | ⏭ 跳过 |  | 修复风险过大、收益很小：建议的 lstat 复核只能缩小窗口，不能关闭 TOCTOU（send2trash 只接受路径字符串）；彻底修复需要 Windows 专用的基于句柄的删除，见 R3-D3 |
 | L13 | ✅ 已修复 |  | 新增 `requirements.lock`（当前测试环境的完整依赖闭包，精确版本），作为 constraints 文件可选使用：`pip install -r requirements.txt -c requirements.lock`；`requirements.txt` 不变。新增测试保证锁文件覆盖每个直接依赖以及影响 pHash 的 NumPy/SciPy/PyWavelets |
 
 ### 第三轮决策记录
@@ -45,6 +45,15 @@
   追加在文件末尾；本分支基于 `claude/medium-fixes`，如果也追加到末尾，两条分支合并时会在同一位置冲突。
 - **R3-D2 L7 不加取消按钮**：02-findings 建议「有限次重试并退避；提供取消按钮」。重试和放弃时自动取消后端扫描
   已经解决了「结果被丢弃、再次扫描返回 409」；取消按钮要改 HTML、样式和交互，属于新功能，不在低风险修复范围内。
+- **R3-D3 L12 跳过**：建议的「删除前用 `lstat` 复核」只能缩小检查与使用之间的窗口，不能消除它：`send2trash`
+  只接受路径字符串，Windows 上由 Shell 按路径重新解析。现在每个文件的检查（realpath、白名单、M8 的指纹 stat）
+  与 `send2trash` 之间只隔几微秒，再加一次复核几乎没有收益。真正关闭这个 TOCTOU 需要改成基于句柄的删除
+  （打开句柄、用 `GetFinalPathNameByHandle` 核对、再交给 `IFileOperation` 回收），是 Windows 专用的大改动，
+  风险远大于收益。利用前提是攻击者对扫描目录有写权限且能精确卡住时机，后果是文件进回收站（可还原）。
+- **R3-D4 L11 中已不成立的两项**：`scrollContainer` 在 H4 修复后已被使用；`.lightbox img.zoomed` 是有效规则
+  （`setZoom` 会给预览图加 `zoomed`）。这两项按误报处理，未改。
+- **R3-D5 先 L11 后 L9**：L9 的合并逻辑放在 L11 抽出的公共函数 `stageDeletion` 里，所以先提交 L11 的纯清理
+  （不改行为），再提交 L9 的行为修改，两个 commit 各自只对应一个编号。
 
 ## 阶段 0：基线
 
