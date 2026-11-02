@@ -123,6 +123,73 @@ def test_scanner_cancel(tmp_path):
     final_res = results[-1][1]
     assert final_res.get('cancelled') is True
 
+def test_parallel_results_yield_each_file_once_and_failures_as_empty():
+    scanner = Scanner(max_workers=3)
+    filepaths = [f"photo-{index}.jpg" for index in range(200)]
+
+    def worker(filepath, cancel_event):
+        assert cancel_event is scanner._cancel_event
+        if filepath.endswith("7.jpg"):
+            raise RuntimeError("decoder failed")
+        return filepath.upper()
+
+    results = list(scanner._iter_parallel_results(filepaths, worker))
+
+    assert sorted(results) == sorted(
+        (filepath, "" if filepath.endswith("7.jpg") else filepath.upper()) for filepath in filepaths
+    )
+    assert list(scanner._iter_parallel_results([], worker)) == []
+
+
+def test_parallel_results_bound_unconsumed_work_to_twice_the_workers():
+    import threading
+    import time
+
+    scanner = Scanner(max_workers=2)
+    started = 0
+    lock = threading.Lock()
+
+    def worker(filepath, _cancel_event):
+        nonlocal started
+        with lock:
+            started += 1
+        time.sleep(0.001)
+        return filepath
+
+    consumed = 0
+    furthest_ahead = 0
+    for _ in scanner._iter_parallel_results([str(index) for index in range(120)], worker):
+        consumed += 1
+        with lock:
+            furthest_ahead = max(furthest_ahead, started - consumed)
+
+    assert consumed == 120
+    assert furthest_ahead <= 2 * 2
+
+
+def test_parallel_results_stop_after_the_yield_that_observed_cancel():
+    scanner = Scanner(max_workers=1)
+    started = []
+
+    def worker(filepath, _cancel_event):
+        started.append(filepath)
+        return filepath
+
+    yielded = []
+    for item in scanner._iter_parallel_results([str(index) for index in range(50)], worker):
+        yielded.append(item)
+        scanner.cancel()
+
+    assert len(yielded) == 1
+    assert len(started) <= 2
+
+
+def test_parallel_results_cancelled_before_start_yield_nothing():
+    scanner = Scanner(max_workers=2)
+    scanner.cancel()
+    assert list(scanner._iter_parallel_results(["a.jpg", "b.jpg", "c.jpg"], lambda path, _event: path)) == []
+
+
 def test_scanner_generate_thumbnail(tmp_path):
     scanner = Scanner()
     
