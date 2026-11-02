@@ -12,8 +12,8 @@
 | 3 | 安全审计 → `02-findings.md`「安全」 | ✅ 完成 | 新增 M11（DNS 重绑定）、L14、L15；注入/反序列化/密钥：无；pip-audit：无已知漏洞 |
 | 4 | 修复高危问题 + PR → main | ✅ 完成 | H1–H4 已修复（各 1 commit + 回归测试），[PR #4](https://github.com/OranngeAustin/photo-cleaner/pull/4) → main；Python 21✓/1✗（既有）、Node 23✓ |
 | 5 | 性能分析 → `03-perf-plan.md` | ✅ 完成 | 新增 `benchmarks/bench_scanner.py`；选中：聚类、结果路径白名单、并行调度 |
-| 6 | 算法优化（前 3 项，各自 `claude/perf-*` 分支 + PR → review-fixes） | 🔄 进行中 | 6.1 聚类 ✅ [PR #5](https://github.com/OranngeAustin/photo-cleaner/pull/5)（−69%）；6.2 结果路径白名单 ✅ [PR #6](https://github.com/OranngeAustin/photo-cleaner/pull/6)（−58%）；6.3 并行调度 ⬜ |
-| 7 | 总结 → `00-SUMMARY.md` | ⬜ 未开始 | |
+| 6 | 算法优化（前 3 项，各自 `claude/perf-*` 分支 + PR → review-fixes） | ✅ 完成 | 6.1 聚类 [PR #5](https://github.com/OranngeAustin/photo-cleaner/pull/5) −69%；6.2 结果路径白名单 [PR #6](https://github.com/OranngeAustin/photo-cleaner/pull/6) −58%；6.3 并行调度 [PR #7](https://github.com/OranngeAustin/photo-cleaner/pull/7) −9%（3 种方案均未达 20%，按规则保留最好的正确版本） |
+| 7 | 总结 → `00-SUMMARY.md` | ✅ 完成 | 见 [00-SUMMARY.md](00-SUMMARY.md) |
 
 ## 阶段 0：基线
 
@@ -59,3 +59,13 @@ Pillow 12.3.0、pillow-heif 1.8.1、ImageHash 4.3.2、Send2Trash 2.1.0、pywebvi
   多线程下取消发生在锚点内部的时间点本来就不确定。最坏偏斜输入仍为 O(K²)，只拿到 1.46× 的提升，已在 PR 中如实说明。
 - **D10 白名单优化保持精确语义**：去掉逐文件的 `islink` 检查还能更快，但符号链接文件的白名单键会从「链接目标」变成「链接所在位置」。
   虽然这样更严格，却改变了行为，所以没有采用。现在的做法是：遇到符号链接文件就回退到原来的逐条 `realpath`。
+- **D11 并行调度的取舍**：一共试了 3 种方案。完成队列（采用）：−9%；批量补交：−8.5%～−13%，与前者的差别在测量噪声内；
+  自建线程池原型：调度 −56%，但端到端只快 −3%。热缓存下真正的瓶颈是线程 / GIL 争用。提升在 5%～20% 之间，
+  按 RUNBOOK 保留最好的正确版本，并在 PR #7 中明确写出「未达目标、可以直接关闭」。
+- **D12 合并检查**：在本地临时分支上，把 3 个 perf 分支依次合并进 review-fixes，均无冲突；合并后 Python 56 项通过、1 项失败（已有问题），
+  Node 23 项通过。临时分支只在本地，检查完已删除，没有推送。
+
+## 结束状态
+
+- 推送到远端的分支：`claude/review-fixes`、`claude/perf-cluster`、`claude/perf-result-keys`、`claude/perf-parallel`。
+- 未推送 `main`，未 force push，未合并任何 PR，未删除任何远端分支。
