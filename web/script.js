@@ -544,14 +544,23 @@ function restorePendingDeletion(deletion) {
 function removeDeletedPaths(tabName, deletedPaths) {
     const currentData = tabName === 'exact' ? exactData : similarData;
     const container = tabName === 'exact' ? exactList : similarList;
-    const selectedPaths = new Set(
-        Array.from(container.querySelectorAll('.image-item.selected'))
-            .map(item => item.dataset.path)
-            .filter(path => !deletedPaths.has(path))
-    );
+    const previouslySelected = Array.from(container.querySelectorAll('.image-item.selected'))
+        .map(item => item.dataset.path);
+    const selectedPaths = new Set(previouslySelected.filter(path => !deletedPaths.has(path)));
+    const lostSelections = new Set(previouslySelected.filter(path => deletedPaths.has(path)));
     const updatedData = currentData
         .map(group => group.filter(path => !deletedPaths.has(path)))
         .filter(group => group.length > 1);
+
+    // A kept photo can be deleted from the other tab. Never leave such a group
+    // with nothing selected, or the next clean would remove every remaining copy.
+    currentData.forEach(group => {
+        if (!group.some(path => lostSelections.has(path))) return;
+        const survivors = group.filter(path => !deletedPaths.has(path));
+        if (survivors.length > 1 && !survivors.some(path => selectedPaths.has(path))) {
+            selectedPaths.add(survivors[0]);
+        }
+    });
 
     if (tabName === 'exact') {
         exactData = updatedData;
